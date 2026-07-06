@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/29680136/README.md)
 <p align="center">
   <a href="https://pypi.org/project/gramly/"><img alt="PyPI Version" src="https://shieldcn.dev/pypi/gramly.svg?variant=default&size=default&mode=dark&color=2563eb"></a>
   &nbsp;
