@@ -14,7 +14,9 @@
   <a href="https://pypi.org/project/gramly/"><img alt="Downloads" src="https://shieldcn.dev/pypi/dm/gramly.svg?variant=default&size=default&mode=dark&color=2563eb"></a>
 </p>
 
-<h1 align="center">Gramly</h1>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/GaussticDev/gramly/refs/heads/main/logoGramly_i.svg" alt="Gramly Logo" width="200">
+</p>
 
 <p align="center">
   A lightweight Python framework for Telegram bots.<br>
