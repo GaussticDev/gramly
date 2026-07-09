@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
 import threading
@@ -61,7 +62,7 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers":  ["business_connection"],
     "_commandBlocks":          ["message", "callback_query"],
 }
-__version__ = "1.2.8"
+__version__ = "1.3.0"
 __bot_api_version__ = "10.1"
 
 
@@ -76,6 +77,7 @@ __all__ = [
     "matchText", "TextRoute",
     "Obj", "User", "Chat", "SuccessfulPayment",
     "buildInlineKeyboard", "buildReplyKeyboard",
+    "DEFAULT_PERMISSIONS",
     "__version__", "__bot_api_version__",
 ]
 
@@ -97,6 +99,11 @@ def chatId(target) -> int:
     if isinstance(target, int):
         return target
     if isinstance(target, dict):
+        if "chat" in target:
+            c = target["chat"]
+            return chatId(c)
+        if "message" in target:
+            return chatId(target["message"])
         if "id" not in target:
             raise TypeError(f"dict has no 'id' key: {list(target)[:5]!r}")
         v = target["id"]
@@ -135,6 +142,15 @@ def chatId(target) -> int:
 def userId(target) -> Optional[int]:
     if isinstance(target, int):
         return target
+    if isinstance(target, dict):
+        if target.get("from"):
+            f = target["from"]
+            return f.get("id") if isinstance(f, dict) else getattr(f, "id", None)
+        if target.get("user"):
+            u = target["user"]
+            return u.get("id") if isinstance(u, dict) else getattr(u, "id", None)
+        v = target.get("id")
+        return v if isinstance(v, int) else None
     if hasattr(target, "user_id"):
         return target.user_id
     if hasattr(target, "from_user") and target.from_user:
@@ -172,13 +188,27 @@ _EXT_TYPE: dict = {
     "flac": "audio", "wav": "audio", "opus": "audio",
 }
 
+_EXT_MIME: dict = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+    "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp",
+    "mp4": "video/mp4", "mov": "video/quicktime", "avi": "video/x-msvideo",
+    "mkv": "video/x-matroska", "webm": "video/webm",
+    "mp3": "audio/mpeg", "ogg": "audio/ogg", "m4a": "audio/mp4",
+    "flac": "audio/flac", "wav": "audio/wav", "opus": "audio/ogg",
+    "pdf": "application/pdf", "zip": "application/zip",
+}
+
+_MEDIA_CONTENT_KEYS = (
+    "photo", "video", "animation", "audio", "document", "voice",
+    "video_note", "sticker", "live_photo",
+)
+
 def mimeType(ext: str) -> str:
-    t = _EXT_TYPE.get(ext.lower())
-    if t:
-        return _MEDIA_META[t][0]
-    _CT: dict = {"pdf": "application/pdf", "zip": "application/zip",
-                 "mov": "video/quicktime", "webp": "image/webp"}
-    return _CT.get(ext.lower(), "application/octet-stream")
+    clean = (ext or "").lower().lstrip(".")
+    if clean in _EXT_MIME:
+        return _EXT_MIME[clean]
+    guessed, _ = mimetypes.guess_type(f"file.{clean}" if clean else "")
+    return guessed or "application/octet-stream"
 
 
 def _typeFromPath(path: str) -> str:
@@ -561,7 +591,7 @@ def buildReplyKeyboard(rows) -> dict:
                 if b.get("request_poll"):
                     btnObj["request_poll"] = {"type": b["request_poll"]}
                 if b.get("request_user"):
-                    btnObj["request_user"] = b["request_user"]
+                    btnObj["request_users"] = b["request_user"]
                 if b.get("request_chat"):
                     btnObj["request_chat"] = b["request_chat"]
                 if b.get("mini_app"):
@@ -654,12 +684,28 @@ class Message(ArgsMixin):
         return self.from_user.id if self.from_user else None
 
     @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
+
+    @property
     def chat_id(self) -> int:
         return self.chat.id
 
     @property
+    def chatId(self) -> int:
+        return self.chat_id
+
+    @property
     def chat_type(self) -> Optional[str]:
         return self.chat.type
+
+    @property
+    def chatType(self) -> Optional[str]:
+        return self.chat_type
+
+    @property
+    def messageId(self) -> Optional[int]:
+        return self.message_id
 
     @property
     def isPrivate(self) -> bool:
@@ -695,7 +741,7 @@ class Message(ArgsMixin):
 
     @property
     def userShared(self):
-        return wrap(self._raw.get("user_shared"))
+        return wrap(self._raw.get("users_shared") or self._raw.get("user_shared"))
 
     @property
     def chatShared(self):
@@ -732,7 +778,9 @@ class Message(ArgsMixin):
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        v = self._raw.get(name)
+        if name not in self._raw:
+            raise AttributeError(name)
+        v = self._raw[name]
         return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
@@ -759,12 +807,24 @@ class CallbackQuery(ArgsMixin):
         return self.from_user.id if self.from_user else None
 
     @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
+
+    @property
     def chat_id(self) -> Optional[int]:
         return self.chat.id if self.chat else None
 
     @property
+    def chatId(self) -> Optional[int]:
+        return self.chat_id
+
+    @property
     def message_id(self) -> int:
         return getattr(self.message, "message_id", None)
+
+    @property
+    def messageId(self) -> Optional[int]:
+        return self.message_id
 
     @property
     def isInline(self) -> bool:
@@ -777,7 +837,9 @@ class CallbackQuery(ArgsMixin):
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        v = self._raw.get(name)
+        if name not in self._raw:
+            raise AttributeError(name)
+        v = self._raw[name]
         return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
@@ -851,6 +913,10 @@ class PreCheckout:
         return u.id if u else None
 
     @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
+
+    @property
     def currency(self) -> str:
         return self._raw.get("currency")
 
@@ -892,6 +958,10 @@ class JoinRequest:
         return u.id if u else None
 
     @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
+
+    @property
     def chat(self):
         return Chat.fromDict(self._raw.get("chat"))
 
@@ -900,9 +970,17 @@ class JoinRequest:
         return self.chat.id
 
     @property
+    def chatId(self) -> int:
+        return self.chat_id
+
+    @property
     def userChatId(self) -> Optional[int]:
         v = self._raw.get("user_chat_id")
         return int(v) if v else None
+
+    @property
+    def queryId(self) -> Optional[str]:
+        return self._raw.get("query_id")
 
     @property
     def inviteLink(self):
@@ -915,8 +993,10 @@ class JoinRequest:
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        v = self._raw.get(name)
-        return wrap(v) if isinstance(v, dict) else v
+        if name not in self._raw:
+            raise AttributeError(name)
+        v = self._raw[name]
+        return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
         return f"JoinRequest(user={self.user_id}, chat={self.chat_id})"
@@ -960,31 +1040,56 @@ class BusinessConnection:
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        v = self._raw.get(name)
+        if name not in self._raw:
+            raise AttributeError(name)
+        v = self._raw[name]
         return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
         return f"BusinessConnection(id={self.id!r}, enabled={self.isEnabled})"
 
 
-class BusinessMessage:
-    __slots__ = ("_raw", "_gramly", "bc_id", "chat_id", "text", "from_user")
+class BusinessMessage(ArgsMixin):
+    __slots__ = (
+        "_raw", "_gramly", "args", "match",
+        "bc_id", "chat_id", "message_id", "text", "from_user", "chat",
+    )
 
-    def __init__(self, raw: dict, gramly):
+    def __init__(self, raw: dict, gramly, args: list = None, match=None):
         self._raw = raw
         self._gramly = gramly
+        self.args = args or []
+        self.match = match
         self.bc_id = raw.get("business_connection_id")
-        self.text = raw.get("text")
-        self.chat_id = (raw.get("chat") or {}).get("id")
+        self.text = raw.get("text") or raw.get("caption")
+        self.chat = Chat.fromDict(raw.get("chat")) or Chat(id=0, type="unknown")
+        self.chat_id = self.chat.id
+        self.message_id = raw.get("message_id")
         self.from_user = User.fromDict(raw.get("from"))
 
     @property
-    def message_id(self) -> Optional[int]:
-        return self._raw.get("message_id")
+    def businessConnectionId(self) -> Optional[str]:
+        return self.bc_id
 
     @property
-    def chat(self):
-        return Chat.fromDict(self._raw.get("chat"))
+    def bcId(self) -> Optional[str]:
+        return self.bc_id
+
+    @property
+    def messageId(self) -> Optional[int]:
+        return self.message_id
+
+    @property
+    def chatId(self) -> int:
+        return self.chat_id
+
+    @property
+    def user_id(self) -> Optional[int]:
+        return self.from_user.id if self.from_user else None
+
+    @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
 
     @property
     def isOwner(self) -> bool:
@@ -1007,7 +1112,9 @@ class BusinessMessage:
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        v = self._raw.get(name)
+        if name not in self._raw:
+            raise AttributeError(name)
+        v = self._raw[name]
         return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
@@ -1749,17 +1856,15 @@ class Gramly:
         if business:
             def decorator(fn):
                 def _handle(msg: BusinessMessage):
-                    if any(f is not None for f in (exact, starts, contains, regex)):
-                        text = msg.text or ""
-                        tl = text.lower()
-                        if exact is not None and tl != exact.lower():
+                    if any(f is not None for f in (commands, exact, starts, ends, contains, regex)):
+                        args, match = matchText(
+                            msg.text, commands=commands, exact=exact, starts=starts, ends=ends,
+                            contains=contains, regex=regex, withSlash=withSlash, withoutSlash=withoutSlash,
+                        )
+                        if args is None:
                             return
-                        if starts is not None and not tl.startswith(starts.lower()):
-                            return
-                        if contains is not None and contains.lower() not in tl:
-                            return
-                        if regex is not None and not re.search(regex, text, re.IGNORECASE):
-                            return
+                        msg.args = args
+                        msg.match = match
                     if guard and not guard(msg):
                         return
                     self._submit(fn, msg)
@@ -2625,7 +2730,7 @@ class Gramly:
 
     def savePreparedKeyboardButton(self, text: str, requestUser: dict = None, requestChat: dict = None, requestManagedBot: dict = None, webApp: dict = None, loginUrl: dict = None, switchInline: str = None, switchInlineCurrent: str = None, switchInlineChosen: dict = None, copyText: dict = None, pay: bool = None):
         btn = {"text": text}
-        if requestUser: btn["request_user"] = requestUser
+        if requestUser: btn["request_users"] = requestUser
         if requestChat: btn["request_chat"] = requestChat
         if requestManagedBot: btn["request_managed_bot"] = requestManagedBot
         if webApp: btn["web_app"] = webApp
