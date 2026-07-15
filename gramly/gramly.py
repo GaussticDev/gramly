@@ -14,10 +14,45 @@ from typing import Callable, Optional
 
 import httpx
 
-_log = logging.getLogger("gramly")
 _CB_LIMIT = 64
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _MAX_RETRIES = 3
+_LEVEL_TAG = {logging.DEBUG: "Debug", logging.INFO: "Info", logging.WARNING: "Warning", logging.ERROR: "Error"}
+
+
+class _Log:
+
+    def __init__(self):
+        self._logger = logging.getLogger("gramly")
+
+    def setup(self, debug: bool) -> None:
+        self._logger.setLevel(logging.DEBUG if debug else logging.INFO)
+        if not self._logger.handlers:
+            h = logging.StreamHandler()
+            h.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+            self._logger.addHandler(h)
+        self._logger.propagate = False
+
+    def _emit(self, level: int, action: str, exc_info=None, **ctx):
+        tag = _LEVEL_TAG.get(level, "?")
+        parts = " ".join(f"{k}={v}" for k, v in ctx.items() if v is not None)
+        line = f"{tag} {action}  {parts}".rstrip() if parts else f"{tag} {action}"
+        self._logger.log(level, line, exc_info=exc_info)
+
+    def debug(self, action: str, **ctx):
+        self._emit(logging.DEBUG, action, **ctx)
+
+    def info(self, action: str, **ctx):
+        self._emit(logging.INFO, action, **ctx)
+
+    def warning(self, action: str, **ctx):
+        self._emit(logging.WARNING, action, **ctx)
+
+    def error(self, action: str, exc_info=None, **ctx):
+        self._emit(logging.ERROR, action, exc_info=exc_info, **ctx)
+
+
+_log = _Log()
 
 DEFAULT_PERMISSIONS: dict = {
     "can_send_messages": True,
@@ -62,7 +97,7 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers":  ["business_connection"],
     "_commandBlocks":          ["message", "callback_query"],
 }
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 __bot_api_version__ = "10.1"
 
 
@@ -83,14 +118,7 @@ __all__ = [
 
 
 def setupLogging(debug: bool) -> None:
-    _log.setLevel(logging.DEBUG if debug else logging.INFO)
-    if not _log.handlers:
-        h = logging.StreamHandler()
-        h.setFormatter(logging.Formatter(
-            "[gramly] %(levelname)-8s %(asctime)s  %(message)s", datefmt="%H:%M:%S"
-        ))
-        _log.addHandler(h)
-    _log.propagate = False
+    _log.setup(debug)
 
 
 def chatId(target) -> int:
@@ -169,7 +197,6 @@ def toList(value) -> list:
 
 def isNotModified(e: Exception) -> bool:
     return "message is not modified" in str(e).lower()
-
 
 
 _MEDIA_META: dict = {
@@ -609,6 +636,9 @@ class TelegramError(Exception):
         self.error_code = errorCode
         self.retry_after = retryAfter
 
+    def __str__(self) -> str:
+        return f"{self.error_code}: {self.description}" if self.error_code else self.description
+
 
 class CallbackData:
     __slots__ = ("raw", "parts")
@@ -788,7 +818,7 @@ class Message(ArgsMixin):
 
 
 class CallbackQuery(ArgsMixin):
-    __slots__ = ("_raw", "cb", "args", "data", "message", "from_user", "chat", "id", "_answered")
+    __slots__ = ("_raw", "cb", "args", "data", "message", "from_user", "chat", "id", "_answered", "bc_id")
 
     def __init__(self, raw: dict, cb: CallbackData, args: list = None):
         self._raw = raw
@@ -800,7 +830,16 @@ class CallbackQuery(ArgsMixin):
         msg = raw.get("message") or {}
         self.chat = Chat.fromDict(msg.get("chat")) if msg.get("chat") else None
         self.id = raw.get("id")
+        self.bc_id = msg.get("business_connection_id")
         self._answered = False
+
+    @property
+    def businessConnectionId(self) -> Optional[str]:
+        return self.bc_id
+
+    @property
+    def bcId(self) -> Optional[str]:
+        return self.bc_id
 
     @property
     def user_id(self) -> Optional[int]:
@@ -1109,6 +1148,12 @@ class BusinessMessage(ArgsMixin):
         ids = messageIds if messageIds is not None else [self.message_id]
         return self._gramly.businessDelete(self.bc_id, self.chat_id, ids)
 
+    def pin(self, notify: bool = False):
+        return self._gramly.pin(self, notify=notify)
+
+    def unpin(self):
+        return self._gramly.unpin(self.chat_id, self.message_id, bcId=self.bc_id)
+
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
@@ -1209,7 +1254,7 @@ class AsyncAPIClient:
         try:
             result = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
-            raise TelegramError(f"Invalid JSON response: {raw[:200]!r}", 0)
+            raise TelegramError("non-JSON response", 0)
         if not result.get("ok"):
             p = result.get("parameters") or {}
             raise TelegramError(
@@ -1218,6 +1263,13 @@ class AsyncAPIClient:
                 retryAfter=p.get("retry_after"),
             )
         return wrap(result.get("result"))
+
+    def _safeParse(self, response) -> TelegramError:
+        try:
+            self._parse(response.content)
+            return TelegramError("unknown error", response.status_code)
+        except TelegramError as e:
+            return e if e.error_code else TelegramError(e.description, response.status_code)
 
     async def _with_retry(self, op):
         last_exc: Exception = RuntimeError("retry: no attempts made")
@@ -1231,16 +1283,11 @@ class AsyncAPIClient:
                     continue
                 raise
             except httpx.HTTPStatusError as e:
-                try:
-                    return self._parse(e.response.content)
-                except TelegramError as e2:
-                    last_exc = e2
-                    if e2.error_code == 429 and e2.retry_after:
-                        await asyncio.sleep(e2.retry_after)
-                        continue
-                    raise TelegramError(
-                        f"HTTP {e.response.status_code}: {e.response.text[:200]}"
-                    ) from e
+                last_exc = self._safeParse(e.response)
+                if last_exc.error_code == 429 and last_exc.retry_after:
+                    await asyncio.sleep(last_exc.retry_after)
+                    continue
+                raise last_exc from e
         raise last_exc
 
     async def call(self, method: str, **params):
@@ -1682,6 +1729,26 @@ class Gramly:
             return coro
         return self._run_coro(coro)
 
+    async def _safeCoro(self, method, **params):
+        try:
+            return await self._api.call(method, **params)
+        except Exception as e:
+            _log.warning(method, err=e)
+            return None
+
+    def _safe(self, method, **params):
+        coro = self._safeCoro(method, **params)
+        if _in_async_task():
+            return coro
+        return self._run_coro(coro)
+
+    def _editSafe(self, action: str, method: str, kind: str = None, **params):
+        try:
+            return self._api_call(method, **params)
+        except TelegramError as e:
+            if not isNotModified(e):
+                _log.warning(action, kind=kind, err=e)
+
     def _api_callFile(self, method, fileKey, fileObj, filename, contentType, **params):
         coro = self._api.callFile(method, fileKey=fileKey, fileObj=fileObj, filename=filename, contentType=contentType, **params)
         if _in_async_task():
@@ -1694,9 +1761,9 @@ class Gramly:
             return coro
         return self._run_coro(coro)
 
-    def _debug(self, *args, level: str = "debug"):
+    def _debug(self, action: str, **ctx):
         if self.debug:
-            getattr(_log, level)(" ".join(str(a) for a in args))
+            _log.debug(action, **ctx)
 
     def _markHandled(self, msgId):
         if msgId is not None:
@@ -1749,7 +1816,7 @@ class Gramly:
                 if not lock.locked():
                     self._userCbLocks.pop(uid, None)
         else:
-            self._debug(f"drop callback uid={uid} - busy")
+            self._debug("drop callback", uid=uid, reason="busy")
             if callId:
                 try:
                     await self._api.call("answerCallbackQuery", callback_query_id=callId, cache_time=1)
@@ -1763,7 +1830,7 @@ class Gramly:
             else:
                 await asyncio.to_thread(fn, *args)
         except Exception:
-            _log.error(f"handler error in {getattr(fn, '__name__', repr(fn))}:", exc_info=True)
+            _log.error("handler", fn=getattr(fn, "__name__", repr(fn)), exc_info=True)
 
     async def _runCallback(self, parsed, fn):
         try:
@@ -1772,7 +1839,7 @@ class Gramly:
             else:
                 await asyncio.to_thread(fn, parsed)
         except Exception:
-            _log.error(f"callback handler error in {fn.__name__}:", exc_info=True)
+            _log.error("callback_handler", fn=fn.__name__, exc_info=True)
         finally:
             if not parsed._answered:
                 _ack = self.alert(parsed, text="", popup=False)
@@ -1792,18 +1859,21 @@ class Gramly:
     def _msgTarget(self, call):
         if isinstance(call, CallbackQuery):
             hasPhoto = bool(call.message.get("photo") if isinstance(call.message, dict) else getattr(call.message, "photo", None))
-            return call.chat_id, call.message_id, hasPhoto
+            return call.chat_id, call.message_id, hasPhoto, call.bc_id
+        if isinstance(call, BusinessMessage):
+            return call.chat_id, call.message_id, bool(call._raw.get("photo")), call.bc_id
         if isinstance(call, Message):
-            return call.chat_id, call.message_id, bool(call._raw.get("photo"))
+            return call.chat_id, call.message_id, bool(call._raw.get("photo")), None
         if isinstance(call, dict):
             msg = call.get("message", call)
-            return msg.get("chat", {}).get("id"), msg.get("message_id"), bool(msg.get("photo"))
+            return msg.get("chat", {}).get("id"), msg.get("message_id"), bool(msg.get("photo")), msg.get("business_connection_id")
         cid = getattr(call, "chat_id", None)
         if cid is None:
             chatObj = getattr(call, "chat", None)
             if chatObj is not None:
                 cid = chatObj.get("id") if isinstance(chatObj, dict) else getattr(chatObj, "id", None)
-        return cid, getattr(call, "message_id", None), bool(getattr(call, "photo", None))
+        bcId = getattr(call, "bc_id", None) or getattr(call, "business_connection_id", None)
+        return cid, getattr(call, "message_id", None), bool(getattr(call, "photo", None)), bcId
 
     def _msgFrom(self, message) -> tuple:
         if isinstance(message, Message):
@@ -1818,7 +1888,7 @@ class Gramly:
                 if not fn(raw):
                     return False
             except Exception:
-                _log.error(f"guard error in {fn.__name__}:", exc_info=True)
+                _log.error("guard", fn=fn.__name__, exc_info=True)
                 return False
         return True
 
@@ -1827,7 +1897,7 @@ class Gramly:
             try:
                 fn(raw)
             except Exception:
-                _log.error(f"interceptor error in {fn.__name__}:", exc_info=True)
+                _log.error("interceptor", fn=fn.__name__, exc_info=True)
 
     def _registerCommandBlock(self, block: CommandBlock):
         self._commandBlocks.append(block)
@@ -2081,7 +2151,7 @@ class Gramly:
                 self._bizConnCache[bcId] = conn
             return conn
         except Exception as e:
-            _log.warning(f"businessConnection error: {e}")
+            _log.warning("businessConnection", bc=bcId, err=e)
             return None
 
     def businessSend(self, target, text: str, bcId: str, inline=None, keyboard=None, **kwargs):
@@ -2089,22 +2159,13 @@ class Gramly:
         return self._api_call("sendMessage", chat_id=chatId(target), text=text, parse_mode=self.parse_mode, business_connection_id=bcId, reply_markup=markup, **kwargs)
 
     def businessAction(self, target, bcId: str, action: str = "typing"):
-        try:
-            self._api_call("sendChatAction", chat_id=chatId(target), action=action, business_connection_id=bcId)
-        except Exception as e:
-            _log.warning(f"businessAction error: {e}")
+        return self._safe("sendChatAction", chat_id=chatId(target), action=action, business_connection_id=bcId)
 
     def businessRead(self, bcId: str, chatIdVal: int, maxMessageId: int):
-        try:
-            self._api_call("readBusinessMessage", business_connection_id=bcId, chat_id=chatIdVal, max_message_id=maxMessageId)
-        except Exception as e:
-            _log.warning(f"businessRead error: {e}")
+        return self._safe("readBusinessMessage", business_connection_id=bcId, chat_id=chatIdVal, message_id=maxMessageId)
 
     def businessDelete(self, bcId: str, chatIdVal: int, messageIds: list):
-        try:
-            self._api_call("deleteBusinessMessages", business_connection_id=bcId, chat_id=chatIdVal, message_ids=messageIds)
-        except Exception as e:
-            _log.warning(f"businessDelete error: {e}")
+        return self._safe("deleteBusinessMessages", business_connection_id=bcId, chat_id=chatIdVal, message_ids=messageIds)
 
     def timer(self, seconds: float, fn, fireNow: bool = False) -> TimerHandle:
         handle = TimerHandle()
@@ -2130,7 +2191,7 @@ class Gramly:
     def send(self, target, text: str, inline=None, keyboard=None, photo=None, **kwargs):
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard)
-        self._debug(f"send -> chat={cid} text={text[:40]!r}")
+        self._debug("send", chat=cid, text=f"{text[:40]!r}")
         if photo is not None:
             return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
@@ -2143,71 +2204,44 @@ class Gramly:
         return self._api_call("sendMessage", chat_id=chatIdVal, text=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
 
     def edit(self, call, text: str, inline=None, photo=None, **kwargs):
-        chatIdVal, msgId, hasPhoto = self._msgTarget(call)
+        chatIdVal, msgId, hasPhoto, bcId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
-        self._debug(f"edit -> chat={chatIdVal} msg={msgId}")
+        self._debug("edit", chat=chatIdVal, msg=msgId, bc=bcId)
         if photo is not None:
             media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
-            try:
-                return self._api_call("editMessageMedia", media=media, chat_id=chatIdVal, message_id=msgId, reply_markup=markup, **kwargs)
-            except TelegramError as e:
-                if not isNotModified(e):
-                    _log.warning(f"edit (media) error: {e}")
-            return
+            return self._editSafe("edit", "editMessageMedia", kind="media", media=media, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
         if hasPhoto:
-            try:
-                return self._api_call("editMessageCaption", caption=text, chat_id=chatIdVal, message_id=msgId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-            except TelegramError as e:
-                if not isNotModified(e):
-                    _log.warning(f"edit (caption) error: {e}")
-            return
-        try:
-            return self._api_call("editMessageText", text=text, chat_id=chatIdVal, message_id=msgId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        except TelegramError as e:
-            if not isNotModified(e):
-                _log.warning(f"edit error: {e}")
+            return self._editSafe("edit", "editMessageCaption", kind="caption", caption=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._editSafe("edit", "editMessageText", kind="text", text=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
     def editMarkup(self, call, inline=None):
-        chatIdVal, msgId, _ = self._msgTarget(call)
+        chatIdVal, msgId, _, bcId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
-        try:
-            self._api_call("editMessageReplyMarkup", chat_id=chatIdVal, message_id=msgId, reply_markup=markup)
-        except TelegramError as e:
-            if not isNotModified(e):
-                _log.warning(f"editMarkup error: {e}")
+        return self._editSafe("editMarkup", "editMessageReplyMarkup", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
 
     def replace(self, call, text: str, inline=None, photo=None, **kwargs):
-        chatIdVal, msgId, hasPhoto = self._msgTarget(call)
+        chatIdVal, msgId, hasPhoto, bcId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if photo is not None:
             media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
-            try:
-                return self._api_call("editMessageMedia", media=media, chat_id=chatIdVal, message_id=msgId, reply_markup=markup)
-            except TelegramError as e:
-                if not isNotModified(e):
-                    _log.warning(f"replace (swap photo) error: {e}")
-            return
+            return self._editSafe("replace", "editMessageMedia", kind="swap_photo", media=media, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
         if hasPhoto:
             try:
                 self._api_call("deleteMessage", chat_id=chatIdVal, message_id=msgId)
             except Exception:
                 pass
-            return self._api_call("sendMessage", chat_id=chatIdVal, text=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        try:
-            return self._api_call("editMessageText", text=text, chat_id=chatIdVal, message_id=msgId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        except TelegramError as e:
-            if not isNotModified(e):
-                _log.warning(f"replace error: {e}")
+            return self._api_call("sendMessage", chat_id=chatIdVal, text=text, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._editSafe("replace", "editMessageText", text=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
     def editLiveLocation(self, call, latitude: float, longitude: float, inline=None, **kwargs):
-        chatIdVal, msgId, _ = self._msgTarget(call)
+        chatIdVal, msgId, _, bcId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
-        return self._api_call("editMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, latitude=latitude, longitude=longitude, reply_markup=markup, **kwargs)
+        return self._api_call("editMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, latitude=latitude, longitude=longitude, reply_markup=markup, **kwargs)
 
     def stopLiveLocation(self, call, inline=None, **kwargs):
-        chatIdVal, msgId, _ = self._msgTarget(call)
+        chatIdVal, msgId, _, bcId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
-        return self._api_call("stopMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, reply_markup=markup, **kwargs)
+        return self._api_call("stopMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
 
     def alert(self, call, text: str = "", popup: bool = False):
         if isinstance(call, CallbackQuery):
@@ -2222,7 +2256,7 @@ class Gramly:
         try:
             return self._api_call("answerCallbackQuery", callback_query_id=cid, text=text, show_alert=popup)
         except Exception as e:
-            _log.warning(f"alert error: {e}")
+            _log.warning("alert", err=e)
 
     def ack(self, call):
         self.alert(call, text="", popup=False)
@@ -2257,27 +2291,24 @@ class Gramly:
         return self._api_call("copyMessages", chat_id=chatId(target), from_chat_id=fromChatId, message_ids=messageIds, **kwargs)
 
     def action(self, target, action: str = "typing"):
-        try:
-            self._api_call("sendChatAction", chat_id=chatId(target), action=action)
-        except Exception as e:
-            _log.warning(f"action error: {e}")
+        return self._safe("sendChatAction", chat_id=chatId(target), action=action)
 
     def pin(self, message, notify: bool = False):
         try:
-            chatIdVal, msgId = self._msgFrom(message)
-            self._api_call("pinChatMessage", chat_id=chatIdVal, message_id=msgId, disable_notification=not notify)
+            chatIdVal, msgId, _, bcId = self._msgTarget(message)
+            self._api_call("pinChatMessage", chat_id=chatIdVal, message_id=msgId, disable_notification=not notify, business_connection_id=bcId)
         except Exception as e:
-            _log.warning(f"pin error: {e}")
+            _log.warning("pin", err=e)
 
-    def unpin(self, target, msgId: int = None):
+    def unpin(self, target, msgId: int = None, bcId: str = None):
         cid = chatId(target)
         try:
             if msgId is not None:
-                self._api_call("unpinChatMessage", chat_id=cid, message_id=msgId)
+                self._api_call("unpinChatMessage", chat_id=cid, message_id=msgId, business_connection_id=bcId)
             else:
                 self._api_call("unpinAllChatMessages", chat_id=cid)
         except Exception as e:
-            _log.warning(f"unpin error: {e}")
+            _log.warning("unpin", err=e)
 
     def photo(self, target, photo, caption=None, inline=None, keyboard=None, **kwargs):
         cid = chatId(target)
@@ -2292,28 +2323,39 @@ class Gramly:
                 chat_id=cid, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
+    def businessPhoto(self, target, photo, bcId: str, caption=None, inline=None, keyboard=None, **kwargs):
+        return self.photo(target, photo, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
+
     def animation(self, target, animation, caption: str = None, **kwargs):
         return self._api_call("sendAnimation", chat_id=chatId(target), animation=animation, caption=caption, parse_mode=self.parse_mode, **kwargs)
+
+    def businessAnimation(self, target, animation, bcId: str, caption: str = None, **kwargs):
+        return self.animation(target, animation, caption=caption, business_connection_id=bcId, **kwargs)
 
     def videoNote(self, target, videoNote, **kwargs):
         return self._api_call("sendVideoNote", chat_id=chatId(target), video_note=videoNote, **kwargs)
 
+    def businessVideoNote(self, target, videoNote, bcId: str, **kwargs):
+        return self.videoNote(target, videoNote, business_connection_id=bcId, **kwargs)
+
     def paidMedia(self, target, starCount: int, media: list, **kwargs):
         return self._api_call("sendPaidMedia", chat_id=chatId(target), star_count=starCount, media=media, **kwargs)
 
+    def businessPaidMedia(self, target, starCount: int, media: list, bcId: str, **kwargs):
+        return self.paidMedia(target, starCount, media, business_connection_id=bcId, **kwargs)
+
     def react(self, msg, *emojis, isBig=False):
-        cid = chatId(msg)
-        mid = msg.message_id if hasattr(msg, 'message_id') else msg.get('message_id')
-        if not emojis:
-            self._api_call("setMessageReaction", chat_id=cid, message_id=mid, reaction=[])
-            return
+        cid, mid, _, _ = self._msgTarget(msg)
         reaction = []
         for e in emojis:
             if isinstance(e, str) and e.isdigit():
                 reaction.append({"type": "custom_emoji", "custom_emoji_id": e})
             else:
                 reaction.append({"type": "emoji", "emoji": e})
-        self._api_call("setMessageReaction", chat_id=cid, message_id=mid, reaction=reaction, is_big=isBig)
+        try:
+            self._api_call("setMessageReaction", chat_id=cid, message_id=mid, reaction=reaction, is_big=isBig)
+        except Exception as e:
+            _log.warning("react", chat=cid, msg=mid, err=e)
 
     def _normalizeMediaItem(self, index: int, item, caption: str = None) -> dict:
         if hasattr(item, "read"):
@@ -2356,7 +2398,7 @@ class Gramly:
                         out["parse_mode"] = self.parse_mode
                     return out
                 except Exception as e:
-                    _log.warning(f"media(): could not read file {s!r}: {e}")
+                    _log.warning("media", file=s, err=e)
 
         mtype = _typeFromPath(s) if "." in s.split("/")[-1] else "photo"
         out = {"type": mtype, "media": s}
@@ -2365,7 +2407,6 @@ class Gramly:
             out["parse_mode"] = self.parse_mode
         return out
 
-
     def media(self, target, items, caption: str = None, inline=None, keyboard=None, **kwargs):
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard)
@@ -2373,10 +2414,10 @@ class Gramly:
         if not isinstance(items, list):
             items = [items]
         if not items:
-            _log.warning("media(): empty list")
+            _log.warning("media", reason="empty_list")
             return None
         if len(items) > 10:
-            _log.warning(f"media(): {len(items)} items truncated to 10")
+            _log.warning("media", truncated_from=len(items), truncated_to=10)
             items = items[:10]
 
         normalized = [
@@ -2385,7 +2426,7 @@ class Gramly:
         ]
 
         if len(normalized) > 1:
-            self._debug(f"media -> chat={cid} count={len(normalized)}")
+            self._debug("media", chat=cid, count=len(normalized))
             return self._api_callMediaGroup(cid, normalized, reply_markup=markup, **kwargs)
 
         m = normalized[0]
@@ -2401,33 +2442,60 @@ class Gramly:
             return self._api_callFile(method, fileKey=key, fileObj=m["_bytes"], filename=m["_filename"], contentType=m["_content_type"], chat_id=cid, caption=cap, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         return self._api_call(method, chat_id=cid, **{key: m["media"]}, caption=cap, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
+    def businessMedia(self, target, items, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
+        return self.media(target, items, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
+
     def video(self, target, video, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendVideo", chat_id=chatId(target), video=video, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+
+    def businessVideo(self, target, video, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
+        return self.video(target, video, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def document(self, target, doc, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendDocument", chat_id=chatId(target), document=doc, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
+    def businessDocument(self, target, doc, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
+        return self.document(target, doc, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
+
     def audio(self, target, audio, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendAudio", chat_id=chatId(target), audio=audio, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+
+    def businessAudio(self, target, audio, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
+        return self.audio(target, audio, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def voice(self, target, voice, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendVoice", chat_id=chatId(target), voice=voice, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
+    def businessVoice(self, target, voice, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
+        return self.voice(target, voice, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
+
     def sticker(self, target, sticker, **kwargs):
         return self._api_call("sendSticker", chat_id=chatId(target), sticker=sticker, **kwargs)
+
+    def businessSticker(self, target, sticker, bcId: str, **kwargs):
+        return self.sticker(target, sticker, business_connection_id=bcId, **kwargs)
 
     def location(self, target, latitude: float, longitude: float, **kwargs):
         return self._api_call("sendLocation", chat_id=chatId(target), latitude=latitude, longitude=longitude, **kwargs)
 
+    def businessLocation(self, target, latitude: float, longitude: float, bcId: str, **kwargs):
+        return self.location(target, latitude, longitude, business_connection_id=bcId, **kwargs)
+
     def venue(self, target, latitude: float, longitude: float, title: str, address: str, **kwargs):
         return self._api_call("sendVenue", chat_id=chatId(target), latitude=latitude, longitude=longitude, title=title, address=address, **kwargs)
 
+    def businessVenue(self, target, latitude: float, longitude: float, title: str, address: str, bcId: str, **kwargs):
+        return self.venue(target, latitude, longitude, title, address, business_connection_id=bcId, **kwargs)
+
     def contact(self, target, phone: str, firstName: str, lastName: str = None, **kwargs):
         return self._api_call("sendContact", chat_id=chatId(target), phone_number=phone, first_name=firstName, last_name=lastName, **kwargs)
+
+    def businessContact(self, target, phone: str, firstName: str, bcId: str, lastName: str = None, **kwargs):
+        return self.contact(target, phone, firstName, lastName=lastName, business_connection_id=bcId, **kwargs)
 
     def poll(self, target, question: str, options: list, isAnonymous: bool = True, pollType: str = "regular", correctOptionIds: list = None, explanation: str = None, allowsMultipleAnswers: bool = False, allowsRevoting: bool = None, shuffleOptions: bool = None, allowAddingOptions: bool = None, hideResultsUntilCloses: bool = None, description: str = None, openPeriod: int = None, closeDate: int = None, membersOnly: bool = None, countryCodes: list = None, **kwargs):
         params = dict(chat_id=chatId(target), question=question, options=[{"text": o} if isinstance(o, str) else o for o in options], is_anonymous=isAnonymous, type=pollType, allows_multiple_answers=allowsMultipleAnswers, explanation=explanation)
@@ -2454,11 +2522,20 @@ class Gramly:
         params.update(kwargs)
         return self._api_call("sendPoll", **params)
 
+    def businessPoll(self, target, question: str, options: list, bcId: str, **kwargs):
+        return self.poll(target, question, options, business_connection_id=bcId, **kwargs)
+
     def stopPoll(self, chatIdVal: int, messageId: int, **kwargs):
         return self._api_call("stopPoll", chat_id=chatIdVal, message_id=messageId, **kwargs)
 
+    def businessStopPoll(self, chatIdVal: int, messageId: int, bcId: str, **kwargs):
+        return self.stopPoll(chatIdVal, messageId, business_connection_id=bcId, **kwargs)
+
     def dice(self, target, emoji: str = "\U0001f3b2", **kwargs):
         return self._api_call("sendDice", chat_id=chatId(target), emoji=emoji, **kwargs)
+
+    def businessDice(self, target, bcId: str, emoji: str = "\U0001f3b2", **kwargs):
+        return self.dice(target, emoji=emoji, business_connection_id=bcId, **kwargs)
 
     def game(self, target, gameShortName: str, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
@@ -2468,16 +2545,16 @@ class Gramly:
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendLivePhoto", chat_id=chatId(target), photo=photo, animation=animation, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
-    def messageDraft(self, target, text: str = "", **kwargs):
-        return self._api_call("sendMessageDraft", chat_id=chatId(target), text=text, **kwargs)
+    def messageDraft(self, target, draftId: str, text: str = "", **kwargs):
+        return self._api_call("sendMessageDraft", chat_id=chatId(target), draft_id=draftId, text=text, **kwargs)
 
     def richMessage(self, target, richMessage, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendRichMessage", chat_id=chatId(target), rich_message=richMessage, reply_markup=markup, **kwargs)
 
-    def richMessageDraft(self, target, richMessage, inline=None, keyboard=None, **kwargs):
+    def richMessageDraft(self, target, draftId: str, richMessage, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendRichMessageDraft", chat_id=chatId(target), rich_message=richMessage, reply_markup=markup, **kwargs)
+        return self._api_call("sendRichMessageDraft", chat_id=chatId(target), draft_id=draftId, rich_message=richMessage, reply_markup=markup, **kwargs)
 
     def checklist(self, target, title: str, tasks: list, **kwargs):
         return self._api_call("sendChecklist", chat_id=chatId(target), title=title, tasks=tasks, **kwargs)
@@ -2486,141 +2563,79 @@ class Gramly:
         return self._api_call("editMessageChecklist", chat_id=chatIdVal, message_id=messageId, title=title, tasks=tasks, **kwargs)
 
     def ban(self, chatIdVal: int, userId: int, until: int = 0, revokeMessages: bool = False):
-        try:
-            self._api_call("banChatMember", chat_id=chatIdVal, user_id=userId, until_date=until, revoke_messages=revokeMessages)
-        except Exception as e:
-            _log.warning(f"ban error: {e}")
+        return self._safe("banChatMember", chat_id=chatIdVal, user_id=userId, until_date=until, revoke_messages=revokeMessages)
 
     def unban(self, chatIdVal: int, userId: int):
-        try:
-            self._api_call("unbanChatMember", chat_id=chatIdVal, user_id=userId, only_if_banned=True)
-        except Exception as e:
-            _log.warning(f"unban error: {e}")
+        return self._safe("unbanChatMember", chat_id=chatIdVal, user_id=userId, only_if_banned=True)
 
     def kick(self, chatIdVal: int, userId: int):
         self.ban(chatIdVal, userId)
         self.unban(chatIdVal, userId)
 
     def mute(self, chatIdVal: int, userId: int, until: int = 0):
-        try:
-            self._api_call("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions={"can_send_messages": False}, until_date=until)
-        except Exception as e:
-            _log.warning(f"mute error: {e}")
+        return self._safe("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions={"can_send_messages": False}, until_date=until)
 
     def unmute(self, chatIdVal: int, userId: int):
-        try:
-            self._api_call("restrictChatMember", chat_id=chatIdVal, user_id=userId,
-                           permissions=dict(DEFAULT_PERMISSIONS))
-        except Exception as e:
-            _log.warning(f"unmute error: {e}")
+        return self._safe("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions=dict(DEFAULT_PERMISSIONS))
 
     def restrict(self, chatIdVal: int, userId: int, permissions: dict, until: int = 0):
-        try:
-            self._api_call("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions=permissions, until_date=until)
-        except Exception as e:
-            _log.warning(f"restrict error: {e}")
+        return self._safe("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions=permissions, until_date=until)
 
     def promote(self, chatIdVal: int, userId: int, **permissions):
-        try:
-            self._api_call("promoteChatMember", chat_id=chatIdVal, user_id=userId, **permissions)
-        except Exception as e:
-            _log.warning(f"promote error: {e}")
+        return self._safe("promoteChatMember", chat_id=chatIdVal, user_id=userId, **permissions)
 
     def setAdminTitle(self, chatIdVal: int, userId: int, title: str):
-        try:
-            self._api_call("setChatAdministratorCustomTitle", chat_id=chatIdVal, user_id=userId, custom_title=title)
-        except Exception as e:
-            _log.warning(f"setAdminTitle error: {e}")
+        return self._safe("setChatAdministratorCustomTitle", chat_id=chatIdVal, user_id=userId, custom_title=title)
 
     def setMemberTag(self, chatIdVal: int, userId: int, tag: str):
-        try:
-            self._api_call("setChatMemberTag", chat_id=chatIdVal, user_id=userId, tag=tag)
-        except Exception as e:
-            _log.warning(f"setMemberTag error: {e}")
+        return self._safe("setChatMemberTag", chat_id=chatIdVal, user_id=userId, tag=tag)
 
     def setChatPermissions(self, chatIdVal: int, permissions: dict):
-        try:
-            self._api_call("setChatPermissions", chat_id=chatIdVal, permissions=permissions)
-        except Exception as e:
-            _log.warning(f"setChatPermissions error: {e}")
+        return self._safe("setChatPermissions", chat_id=chatIdVal, permissions=permissions)
 
     def approveJoin(self, chatOrRq, userId: int = None):
         if isinstance(chatOrRq, JoinRequest):
             chatIdVal, uid = chatOrRq.chat_id, chatOrRq.user_id
         else:
             chatIdVal, uid = chatOrRq, userId
-        try:
-            self._api_call("approveChatJoinRequest", chat_id=chatIdVal, user_id=uid)
-        except Exception as e:
-            _log.warning(f"approveJoin error: {e}")
+        return self._safe("approveChatJoinRequest", chat_id=chatIdVal, user_id=uid)
 
     def declineJoin(self, chatOrRq, userId: int = None):
         if isinstance(chatOrRq, JoinRequest):
             chatIdVal, uid = chatOrRq.chat_id, chatOrRq.user_id
         else:
             chatIdVal, uid = chatOrRq, userId
-        try:
-            self._api_call("declineChatJoinRequest", chat_id=chatIdVal, user_id=uid)
-        except Exception as e:
-            _log.warning(f"declineJoin error: {e}")
+        return self._safe("declineChatJoinRequest", chat_id=chatIdVal, user_id=uid)
 
     def answerJoinRequestQuery(self, chatIdVal: int, userId: int, queryId: str, result: dict):
-        try:
-            self._api_call("answerChatJoinRequestQuery", chat_id=chatIdVal, user_id=userId, query_id=queryId, result=result)
-        except Exception as e:
-            _log.warning(f"answerJoinRequestQuery error: {e}")
+        return self._safe("answerChatJoinRequestQuery", chat_id=chatIdVal, user_id=userId, query_id=queryId, result=result)
 
     def sendJoinRequestWebApp(self, chatIdVal: int, userId: int, webAppUrl: str, **kwargs):
         return self._api_call("sendChatJoinRequestWebApp", chat_id=chatIdVal, user_id=userId, web_app_url=webAppUrl, **kwargs)
 
-
     def deleteMessages(self, chatIdVal: int, messageIds: list):
-        try:
-            self._api_call("deleteMessages", chat_id=chatIdVal, message_ids=messageIds)
-        except Exception as e:
-            _log.warning(f"deleteMessages error: {e}")
+        return self._safe("deleteMessages", chat_id=chatIdVal, message_ids=messageIds)
 
     def leave(self, chatIdVal: int):
-        try:
-            self._api_call("leaveChat", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"leave error: {e}")
+        return self._safe("leaveChat", chat_id=chatIdVal)
 
     def setChatTitle(self, chatIdVal: int, title: str):
-        try:
-            self._api_call("setChatTitle", chat_id=chatIdVal, title=title)
-        except Exception as e:
-            _log.warning(f"setChatTitle error: {e}")
+        return self._safe("setChatTitle", chat_id=chatIdVal, title=title)
 
     def setChatDescription(self, chatIdVal: int, description: str):
-        try:
-            self._api_call("setChatDescription", chat_id=chatIdVal, description=description)
-        except Exception as e:
-            _log.warning(f"setChatDescription error: {e}")
+        return self._safe("setChatDescription", chat_id=chatIdVal, description=description)
 
     def setChatPhoto(self, chatIdVal: int, photo):
-        try:
-            self._api_call("setChatPhoto", chat_id=chatIdVal, photo=photo)
-        except Exception as e:
-            _log.warning(f"setChatPhoto error: {e}")
+        return self._safe("setChatPhoto", chat_id=chatIdVal, photo=photo)
 
     def deleteChatPhoto(self, chatIdVal: int):
-        try:
-            self._api_call("deleteChatPhoto", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"deleteChatPhoto error: {e}")
+        return self._safe("deleteChatPhoto", chat_id=chatIdVal)
 
     def banSender(self, chatIdVal: int, senderChatId: int):
-        try:
-            self._api_call("banChatSenderChat", chat_id=chatIdVal, sender_chat_id=senderChatId)
-        except Exception as e:
-            _log.warning(f"banSender error: {e}")
+        return self._safe("banChatSenderChat", chat_id=chatIdVal, sender_chat_id=senderChatId)
 
     def unbanSender(self, chatIdVal: int, senderChatId: int):
-        try:
-            self._api_call("unbanChatSenderChat", chat_id=chatIdVal, sender_chat_id=senderChatId)
-        except Exception as e:
-            _log.warning(f"unbanSender error: {e}")
+        return self._safe("unbanChatSenderChat", chat_id=chatIdVal, sender_chat_id=senderChatId)
 
     def exportInvite(self, chatIdVal: int) -> str:
         return self._api_call("exportChatInviteLink", chat_id=chatIdVal)
@@ -2647,77 +2662,41 @@ class Gramly:
         return self._api_call("editForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId, **kwargs)
 
     def closeTopic(self, chatIdVal: int, messageThreadId: int):
-        try:
-            self._api_call("closeForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
-        except Exception as e:
-            _log.warning(f"closeTopic error: {e}")
+        return self._safe("closeForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
 
     def reopenTopic(self, chatIdVal: int, messageThreadId: int):
-        try:
-            self._api_call("reopenForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
-        except Exception as e:
-            _log.warning(f"reopenTopic error: {e}")
+        return self._safe("reopenForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
 
     def deleteTopic(self, chatIdVal: int, messageThreadId: int):
-        try:
-            self._api_call("deleteForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
-        except Exception as e:
-            _log.warning(f"deleteTopic error: {e}")
+        return self._safe("deleteForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
 
     def unpinTopicMessages(self, chatIdVal: int, messageThreadId: int):
-        try:
-            self._api_call("unpinAllForumTopicMessages", chat_id=chatIdVal, message_thread_id=messageThreadId)
-        except Exception as e:
-            _log.warning(f"unpinTopicMessages error: {e}")
+        return self._safe("unpinAllForumTopicMessages", chat_id=chatIdVal, message_thread_id=messageThreadId)
 
     def editGeneralTopic(self, chatIdVal: int, name: str):
-        try:
-            self._api_call("editGeneralForumTopic", chat_id=chatIdVal, name=name)
-        except Exception as e:
-            _log.warning(f"editGeneralTopic error: {e}")
+        return self._safe("editGeneralForumTopic", chat_id=chatIdVal, name=name)
 
     def closeGeneralTopic(self, chatIdVal: int):
-        try:
-            self._api_call("closeGeneralForumTopic", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"closeGeneralTopic error: {e}")
+        return self._safe("closeGeneralForumTopic", chat_id=chatIdVal)
 
     def reopenGeneralTopic(self, chatIdVal: int):
-        try:
-            self._api_call("reopenGeneralForumTopic", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"reopenGeneralTopic error: {e}")
+        return self._safe("reopenGeneralForumTopic", chat_id=chatIdVal)
 
     def hideGeneralTopic(self, chatIdVal: int):
-        try:
-            self._api_call("hideGeneralForumTopic", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"hideGeneralTopic error: {e}")
+        return self._safe("hideGeneralForumTopic", chat_id=chatIdVal)
 
     def unhideGeneralTopic(self, chatIdVal: int):
-        try:
-            self._api_call("unhideGeneralForumTopic", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"unhideGeneralTopic error: {e}")
+        return self._safe("unhideGeneralForumTopic", chat_id=chatIdVal)
 
     def unpinGeneralTopicMessages(self, chatIdVal: int):
-        try:
-            self._api_call("unpinAllGeneralForumTopicMessages", chat_id=chatIdVal)
-        except Exception as e:
-            _log.warning(f"unpinGeneralTopicMessages error: {e}")
+        return self._safe("unpinAllGeneralForumTopicMessages", chat_id=chatIdVal)
 
     def answerInlineQuery(self, query, results: list, cacheTime: int = 30, isPersonal: bool = True, nextOffset: str = ""):
         qid = query.id if isinstance(query, InlineQuery) else query.get("id") if isinstance(query, dict) else query.id
-        try:
-            self._api_call("answerInlineQuery", inline_query_id=qid, results=results, cache_time=cacheTime, is_personal=isPersonal, next_offset=nextOffset)
-        except Exception as e:
-            _log.warning(f"answerInlineQuery error: {e}")
+        return self._safe("answerInlineQuery", inline_query_id=qid, results=results, cache_time=cacheTime, is_personal=isPersonal, next_offset=nextOffset)
 
     def answerWebAppQuery(self, webAppQueryId: str, result: dict):
-        try:
-            return self._api_call("answerWebAppQuery", web_app_query_id=webAppQueryId, result=result)
-        except Exception as e:
-            _log.warning(f"answerWebAppQuery error: {e}")
+        return self._safe("answerWebAppQuery", web_app_query_id=webAppQueryId, result=result)
 
     def answerGuestQuery(self, queryId: str, text: str, parseMode: str = None, **kwargs):
         return self._api_call("answerGuestQuery", guest_query_id=queryId, message={"text": text, "parse_mode": parseMode or self.parse_mode, **kwargs})
@@ -2762,7 +2741,7 @@ class Gramly:
             self._api_call("refundStarPayment", user_id=userId, telegram_payment_charge_id=chargeId)
             return True
         except Exception as e:
-            _log.warning(f"refund error: {e}")
+            _log.warning("refund", err=e)
             return False
 
     def getStarTransactions(self, offset: int = 0, limit: int = 100):
@@ -2773,21 +2752,18 @@ class Gramly:
             result = self._api_call("getMyStarBalance")
             return result.amount if result else None
         except Exception as e:
-            _log.warning(f"getStarBalance error: {e}")
+            _log.warning("getStarBalance", err=e)
             return None
 
     def editStarSubscription(self, userId: int, telegramPaymentChargeId: str, isCanceled: bool):
-        try:
-            self._api_call("editUserStarSubscription", user_id=userId, telegram_payment_charge_id=telegramPaymentChargeId, is_canceled=isCanceled)
-        except Exception as e:
-            _log.warning(f"editStarSubscription error: {e}")
+        return self._safe("editUserStarSubscription", user_id=userId, telegram_payment_charge_id=telegramPaymentChargeId, is_canceled=isCanceled)
 
     def setEmojiStatus(self, userId: int, customEmojiId: str = None, **kwargs) -> bool:
         try:
             self._api_call("setUserEmojiStatus", user_id=userId, emoji_status={"custom_emoji_id": customEmojiId} if customEmojiId else {}, **kwargs)
             return True
         except Exception as e:
-            _log.warning(f"setEmojiStatus error: {e}")
+            _log.warning("setEmojiStatus", err=e)
             return False
 
     def getUserPhotos(self, userId: int, offset: int = 0, limit: int = 100):
@@ -3136,16 +3112,16 @@ class Gramly:
             me = await self._api.call("getMe")
         except TelegramError as e:
             if e.error_code == 401:
-                _log.error(f"Invalid or revoked token — {e.description}")
+                _log.error("startup", reason="invalid_token", err=e.description)
             else:
-                _log.error(f"Failed to get bot info: {e}")
+                _log.error("startup", reason="getMe_failed", err=e)
             return
-        _log.info(f"@{me.username} (id: {me.id}) ready")
+        _log.info("ready", bot=f"@{me.username}", id=me.id)
 
         if allowedUpdates is None:
             allowedUpdates = self._autoUpdates()
         if allowedUpdates:
-            _log.info(f"allowed_updates: {allowedUpdates}")
+            _log.info("allowed_updates", updates=allowedUpdates)
 
         offset = 0
         if skipPending:
@@ -3154,11 +3130,11 @@ class Gramly:
                 if updates:
                     updates = updates if isinstance(updates, list) else [updates]
                     offset = updates[-1].update_id + 1
-                    _log.info(f"skipped pending, offset={offset}")
+                    _log.info("skip_pending", offset=offset)
             except Exception as e:
-                _log.warning(f"skipPending error: {e}")
+                _log.warning("skip_pending", err=e)
 
-        self._debug("starting long polling...")
+        self._debug("polling_start")
         while not self._stopEvent.is_set():
             try:
                 updates = await self._api.call("getUpdates", offset=offset, timeout=pollTimeout, limit=100, allowed_updates=allowedUpdates)
@@ -3173,13 +3149,13 @@ class Gramly:
                     self._dispatch(raw)
             except TelegramError as e:
                 if "conflict" in str(e).lower():
-                    _log.error(f"polling conflict: {e}")
+                    _log.error("polling", reason="conflict", err=e)
                     break
-                _log.warning(f"getUpdates error: {e}")
+                _log.warning("polling", op="getUpdates", err=e)
                 await asyncio.sleep(1)
             except Exception as e:
                 if not self._stopEvent.is_set():
-                    _log.warning(f"polling error: {e}")
+                    _log.warning("polling", err=e)
                     await asyncio.sleep(1)
 
         await self._shutdown()
@@ -3201,4 +3177,4 @@ class Gramly:
             self._loop = None
 
     def close(self):
-        self._run_coro(self._shutdown())#
+        self._run_coro(self._shutdown())
