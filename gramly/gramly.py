@@ -97,21 +97,18 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers":  ["business_connection"],
     "_commandBlocks":          ["message", "callback_query"],
 }
-__version__ = "1.3.1"
-__bot_api_version__ = "10.1"
+__version__ = "1.3.2"
+__bot_api_version__ = "10.2"
 
 
 __all__ = [
-    "Gramly",
-    "btn", "row", "kbd",
-    "userRequest", "chatRequest",
+    "Gramly", "Rich",
+    "btn", "row", "kbd", "userRequest", "chatRequest",
     "CallbackData", "Message", "CallbackQuery", "InlineQuery", "Payment", "PreCheckout",
     "JoinRequest", "GuestQuery", "BusinessMessage", "BusinessConnection",
     "TimerHandle", "CommandBlock", "TelegramError",
-    "setupLogging", "chatId", "userId", "toList", "isNotModified", "mimeType",
-    "matchText", "TextRoute",
     "Obj", "User", "Chat", "SuccessfulPayment",
-    "buildInlineKeyboard", "buildReplyKeyboard",
+    "setupLogging", "chatId", "userId",
     "DEFAULT_PERMISSIONS",
     "__version__", "__bot_api_version__",
 ]
@@ -225,10 +222,6 @@ _EXT_MIME: dict = {
     "pdf": "application/pdf", "zip": "application/zip",
 }
 
-_MEDIA_CONTENT_KEYS = (
-    "photo", "video", "animation", "audio", "document", "voice",
-    "video_note", "sticker", "live_photo",
-)
 
 def mimeType(ext: str) -> str:
     clean = (ext or "").lower().lstrip(".")
@@ -247,16 +240,26 @@ def _typeFromBytes(data: bytes) -> str:
     if len(data) < 4:
         return "document"
     h = data[:12]
-    if h[:3] == b"\xff\xd8\xff":        return "photo"   # JPEG
-    if h[:4] == b"\x89PNG":             return "photo"   # PNG
-    if h[:4] == b"GIF8":               return "photo"   # GIF
-    if h[:4] == b"RIFF" and data[8:12] == b"WEBP": return "photo"  # WEBP
-    if h[:4] in (b"ftyp", b"\x00\x00\x00\x18", b"\x00\x00\x00\x1c"): return "video"  # MP4/MOV
-    if data[4:8] == b"ftyp":           return "video"   # MP4 offset
-    if h[:4] == b"\x1a\x45\xdf\xa3":   return "video"   # MKV/WebM
-    if h[:3] == b"ID3" or (h[:2] == b"\xff\xfb"): return "audio"  # MP3
-    if h[:4] == b"OggS":               return "audio"   # OGG/Opus
-    if h[:4] == b"fLaC":               return "audio"   # FLAC
+    if h[:3] == b"\xff\xd8\xff":
+        return "photo"
+    if h[:4] == b"\x89PNG":
+        return "photo"
+    if h[:4] == b"GIF8":
+        return "photo"
+    if h[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "photo"
+    if h[:4] in (b"ftyp", b"\x00\x00\x00\x18", b"\x00\x00\x00\x1c"):
+        return "video"
+    if data[4:8] == b"ftyp":
+        return "video"
+    if h[:4] == b"\x1a\x45\xdf\xa3":
+        return "video"
+    if h[:3] == b"ID3" or (h[:2] == b"\xff\xfb"):
+        return "audio"
+    if h[:4] == b"OggS":
+        return "audio"
+    if h[:4] == b"fLaC":
+        return "audio"
     return "document"
 
 
@@ -428,7 +431,6 @@ def userRequest(
     requestUsername: bool = None,
     requestPhoto: bool = None,
 ) -> _UserRequest:
-    
     d = _UserRequest({"request_id": requestId})
     if isBot          is not None: d["user_is_bot"]       = isBot
     if isPremium      is not None: d["user_is_premium"]   = isPremium
@@ -453,7 +455,6 @@ def chatRequest(
     userAdminRights: dict = None,
     botAdminRights: dict = None,
 ) -> _ChatRequest:
-    
     d = _ChatRequest({"request_id": requestId})
     if isChannel        is not None: d["chat_is_channel"]           = isChannel
     if isForum          is not None: d["chat_is_forum"]             = isForum
@@ -469,7 +470,6 @@ def chatRequest(
 
 
 def btn(text: str, action=None, *,
-
     url: str = None,
     miniApp: str = None,
     loginUrl: dict = None,
@@ -629,6 +629,443 @@ def buildReplyKeyboard(rows) -> dict:
     return {"keyboard": keyboard, "resize_keyboard": True}
 
 
+def _compileRuns(parts) -> list:
+    if parts is None:
+        return []
+    if isinstance(parts, str) or (isinstance(parts, dict) and "type" in parts):
+        parts = (parts,)
+    out = []
+    for p in parts:
+        if isinstance(p, str):
+            out.append(p)
+        elif isinstance(p, dict):
+            out.append(p)
+        elif p is not None:
+            out.append(str(p))
+    return out
+
+
+def _asBlocks(parts) -> list:
+    if isinstance(parts, dict) and "blocks" in parts:
+        return parts["blocks"]
+    items = parts if isinstance(parts, (list, tuple)) else (parts,)
+    out = []
+    for it in items:
+        if isinstance(it, dict) and "type" in it:
+            out.append(it)
+        else:
+            out.append({"type": "paragraph", "text": _compileRuns(it)})
+    return out
+
+
+def _resolveMediaSource(item, index: int = 0) -> dict:
+    if hasattr(item, "read"):
+        item = (item.read(), getattr(item, "name", None))
+    if isinstance(item, tuple) and len(item) == 2:
+        data, hint = item
+        if isinstance(data, (bytes, bytearray)):
+            mtype = _typeFromPath(hint) if isinstance(hint, str) and hint else _typeFromBytes(bytes(data))
+            ct, ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
+            fname = hint if (isinstance(hint, str) and "." in hint) else f"file{index}.{ext}"
+            return {"media": "", "_bytes": bytes(data), "_filename": fname, "_content_type": ct}
+        item = data
+    if isinstance(item, (bytes, bytearray)):
+        mtype = _typeFromBytes(bytes(item))
+        ct, ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
+        return {"media": "", "_bytes": bytes(item), "_filename": f"file{index}.{ext}", "_content_type": ct}
+    s = str(item)
+    if ("/" in s or "\\" in s or s.startswith(".")) and os.path.isfile(s):
+        try:
+            with open(s, "rb") as f:
+                data = f.read()
+            fname = os.path.basename(s)
+            mtype = _typeFromPath(fname)
+            ct, _ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
+            return {"media": "", "_bytes": data, "_filename": fname, "_content_type": ct}
+        except Exception as e:
+            _log.warning("richMedia", file=s, err=e)
+    return {"media": s}
+
+
+def _resolveInputMedia(item, mediaType: str = None, index: int = 0, **fields) -> dict:
+    resolved = _resolveMediaSource(item, index)
+    if mediaType is None:
+        if "_bytes" in resolved:
+            mediaType = _typeFromBytes(resolved["_bytes"]) if not resolved.get("_filename") \
+                else _typeFromPath(resolved["_filename"])
+        else:
+            mediaType = _typeFromPath(str(item))
+        if mediaType == "document":
+            mediaType = "photo"
+    entry = {"type": mediaType, "media": resolved["media"]}
+    if "_bytes" in resolved:
+        entry["_bytes"], entry["_filename"], entry["_content_type"] = (
+            resolved["_bytes"], resolved["_filename"], resolved["_content_type"])
+    entry.update({k: v for k, v in fields.items() if v is not None})
+    return entry
+
+
+def _compileMediaMap(media: dict) -> list:
+    if not media:
+        return []
+    out = []
+    for name, item in media.items():
+        wrapped = item if isinstance(item, dict) and "type" in item else _resolveInputMedia(item)
+        out.append({"id": name, "media": wrapped})
+    return out
+
+
+def _collectRichAttachments(obj):
+    files = {}
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "_bytes" in node:
+                key = f"file{len(files)}"
+                files[key] = (
+                    node.get("_filename", f"{key}.bin"),
+                    node["_bytes"],
+                    node.get("_content_type", "application/octet-stream"),
+                )
+                cleaned = {k: v for k, v in node.items() if not k.startswith("_")}
+                cleaned["media"] = f"attach://{key}"
+                return cleaned
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(obj), files
+
+
+_RUN_STYLES = ("bold", "italic", "underline", "strike", "spoiler", "mono", "mark", "sub", "sup")
+_RUN_STYLE_WIRE = {
+    "bold": "bold", "italic": "italic", "underline": "underline", "strike": "strikethrough",
+    "spoiler": "spoiler", "mono": "code", "mark": "marked", "sub": "subscript", "sup": "superscript",
+}
+
+
+def run(text: str, style: str = None, *,
+    link: str = None,
+    mention: int = None,
+    username: str = None,
+    hashtag: str = None,
+    cashtag: str = None,
+    botCommand: str = None,
+    email: str = None,
+    phone: str = None,
+    bankCard: str = None,
+    date: int = None,
+    dateFormat: str = None,
+    math: bool = False,
+) -> dict:
+    kwarg_choices = (link, mention, username, hashtag, cashtag, botCommand, email, phone, bankCard, date, math or None)
+    total = (1 if style is not None else 0) + sum(x is not None for x in kwarg_choices)
+
+    if total == 0:
+        return text
+    if total > 1:
+        raise ValueError(
+            f"run({text!r}): exactly one of style/link/mention/username/hashtag/"
+            f"cashtag/botCommand/email/phone/bankCard/date/math allowed, got {total}"
+        )
+    if style is not None:
+        if style not in _RUN_STYLES:
+            raise ValueError(f"run({text!r}): style must be one of {_RUN_STYLES}, got {style!r}")
+        return {"type": _RUN_STYLE_WIRE[style], "text": [text]}
+    if link is not None:
+        return {"type": "url", "text": [text], "url": link}
+    if mention is not None:
+        return {"type": "text_mention", "text": [text], "user": {"id": mention}}
+    if username is not None:
+        return {"type": "mention", "text": [text], "username": username.lstrip("@")}
+    if hashtag is not None:
+        return {"type": "hashtag", "text": [text], "hashtag": hashtag if hashtag.startswith("#") else f"#{hashtag}"}
+    if cashtag is not None:
+        return {"type": "cashtag", "text": [text], "cashtag": cashtag if cashtag.startswith("$") else f"${cashtag}"}
+    if botCommand is not None:
+        return {"type": "bot_command", "text": [text], "bot_command": botCommand if botCommand.startswith("/") else f"/{botCommand}"}
+    if email is not None:
+        return {"type": "email_address", "text": [text], "email_address": email}
+    if phone is not None:
+        return {"type": "phone_number", "text": [text], "phone_number": phone}
+    if bankCard is not None:
+        return {"type": "bank_card_number", "text": [text], "bank_card_number": bankCard}
+    if date is not None:
+        return {"type": "date_time", "unix_time": date, "date_time_format": dateFormat}
+    if math:
+        return {"type": "mathematical_expression", "text": [text]}
+
+
+def emojiRun(customEmojiId: str, alt: str = "🙂") -> dict:
+    return {"type": "custom_emoji", "custom_emoji_id": customEmojiId, "alternative_text": alt}
+
+
+def anchor(name: str) -> dict:
+    return {"type": "anchor", "name": name}
+
+
+def anchorLink(text: str, name: str) -> dict:
+    return {"type": "anchor_link", "text": [text], "anchor_name": name}
+
+
+def ref(name: str) -> dict:
+    return {"type": "reference", "name": name}
+
+
+def refLink(text: str, name: str) -> dict:
+    return {"type": "reference_link", "text": [text], "reference_name": name}
+
+
+def heading(*parts, size: int = 1) -> dict:
+    return {"type": "heading", "text": _compileRuns(parts), "size": max(1, min(size, 6))}
+
+
+def paragraph(*parts) -> dict:
+    return {"type": "paragraph", "text": _compileRuns(parts)}
+
+
+def footer(*parts) -> dict:
+    return {"type": "footer", "text": _compileRuns(parts)}
+
+
+def quote(*parts, credit=None) -> dict:
+    d = {"type": "blockquote", "blocks": _asBlocks(parts)}
+    if credit:
+        d["credit"] = _compileRuns(credit)
+    return d
+
+
+def pullQuote(*parts, credit=None) -> dict:
+    d = {"type": "pullquote", "text": _compileRuns(parts)}
+    if credit:
+        d["credit"] = _compileRuns(credit)
+    return d
+
+
+def item(*parts, checkbox: bool = None, checked: bool = None,
+         value: int = None, labelType: str = None, children: list = None) -> dict:
+    blocks = list(_asBlocks(parts))
+    if children:
+        blocks.append({"type": "list", "items": [
+            c if isinstance(c, dict) and "blocks" in c else item(c) for c in children
+        ]})
+    d = {"blocks": blocks}
+    if checkbox or checked:
+        d["has_checkbox"] = True
+    if checked:
+        d["is_checked"] = True
+    if value is not None:
+        d["value"] = value
+    if labelType is not None:
+        d["type"] = labelType
+    return d
+
+
+def bulletList(*items) -> dict:
+    compiled = [it if isinstance(it, dict) and "blocks" in it else item(it) for it in items]
+    return {"type": "list", "items": compiled}
+
+
+def codeBlock(text: str, language: str = None) -> dict:
+    d = {"type": "pre", "text": _compileRuns(text)}
+    if language:
+        d["language"] = language
+    return d
+
+
+def mathBlock(expression: str) -> dict:
+    return {"type": "mathematical_expression", "expression": expression}
+
+
+def divider() -> dict:
+    return {"type": "divider"}
+
+
+def thinking(*parts) -> dict:
+    return {"type": "thinking", "text": _compileRuns(parts)}
+
+
+def details(summary, *parts, open: bool = False) -> dict:
+    summaryParts = summary if isinstance(summary, (list, tuple)) else (summary,)
+    d = {"type": "details", "summary": _compileRuns(summaryParts), "blocks": _asBlocks(parts)}
+    if open:
+        d["is_open"] = True
+    return d
+
+
+def table(rows: list, headerRow: bool = True, bordered: bool = None,
+          striped: bool = None, caption=None) -> dict:
+    def cell(c, isHeaderRow: bool):
+        if isinstance(c, dict):
+            d = {"align": c.get("align", "left"), "valign": c.get("valign", "middle")}
+            if "text" in c and c["text"] is not None:
+                d["text"] = _compileRuns(c["text"])
+            if c.get("header", isHeaderRow):
+                d["is_header"] = True
+            if c.get("colspan"):
+                d["colspan"] = c["colspan"]
+            if c.get("rowspan"):
+                d["rowspan"] = c["rowspan"]
+            return d
+        parts = c if isinstance(c, (list, tuple)) else (c,)
+        d = {"text": _compileRuns(parts), "align": "left", "valign": "middle"}
+        if isHeaderRow:
+            d["is_header"] = True
+        return d
+
+    cells = [[cell(c, headerRow and i == 0) for c in r] for i, r in enumerate(rows)]
+    d = {"type": "table", "cells": cells}
+    if bordered is not None:
+        d["is_bordered"] = bordered
+    if striped is not None:
+        d["is_striped"] = striped
+    if caption:
+        d["caption"] = _compileRuns(caption)
+    return d
+
+
+def _caption(caption, credit=None) -> Optional[dict]:
+    if caption is None and credit is None:
+        return None
+    d = {"text": _compileRuns(caption) if caption else []}
+    if credit is not None:
+        d["credit"] = _compileRuns(credit)
+    return d
+
+
+def mapBlock(latitude: float, longitude: float, zoom: int = 15,
+             width: int = 400, height: int = 300, caption=None, credit=None) -> dict:
+    d = {
+        "type": "map",
+        "location": {"latitude": latitude, "longitude": longitude},
+        "zoom": max(0, min(zoom, 24)), "width": width, "height": height,
+    }
+    cap = _caption(caption, credit)
+    if cap:
+        d["caption"] = cap
+    return d
+
+
+def _mediaBlockOf(wireType: str, blockKey: str, media, caption=None, credit=None,
+                   index: int = 0, spoiler: bool = None, **mediaFields) -> dict:
+    resolved = _resolveInputMedia(media, wireType, index, has_spoiler=spoiler or None, **mediaFields)
+    d = {"type": wireType, blockKey: resolved}
+    cap = _caption(caption, credit)
+    if cap:
+        d["caption"] = cap
+    return d
+
+
+def photo(media, caption=None, credit=None, spoiler: bool = False) -> dict:
+    return _mediaBlockOf("photo", "photo", media, caption, credit, spoiler=spoiler)
+
+
+def video(media, caption=None, credit=None, spoiler: bool = False, **kwargs) -> dict:
+    return _mediaBlockOf("video", "video", media, caption, credit, spoiler=spoiler, **kwargs)
+
+
+def animation(media, caption=None, credit=None, spoiler: bool = False, **kwargs) -> dict:
+    return _mediaBlockOf("animation", "animation", media, caption, credit, spoiler=spoiler, **kwargs)
+
+
+def audio(media, caption=None, credit=None, title: str = None, performer: str = None) -> dict:
+    return _mediaBlockOf("audio", "audio", media, caption, credit, title=title, performer=performer)
+
+
+def voiceNote(media, caption=None, credit=None, duration: int = None) -> dict:
+    return _mediaBlockOf("voice_note", "voice_note", media, caption, credit, duration=duration)
+
+
+def _mediaGroup(kind: str, items: list, caption=None, credit=None) -> dict:
+    blocks = []
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and "type" in it:
+            blocks.append(it)
+        else:
+            blocks.append(_mediaBlockOf("photo", "photo", it, index=i))
+    d = {"type": kind, "blocks": blocks}
+    cap = _caption(caption, credit)
+    if cap:
+        d["caption"] = cap
+    return d
+
+
+def collage(items: list, caption=None, credit=None) -> dict:
+    return _mediaGroup("collage", items, caption, credit)
+
+
+def slideshow(items: list, caption=None, credit=None) -> dict:
+    return _mediaGroup("slideshow", items, caption, credit)
+
+
+def _hasThinking(blocks: list) -> bool:
+    return any(b.get("type") == "thinking" for b in blocks)
+
+
+def rich(*blocks, forDraft: bool = False) -> dict:
+    compiled = [dict(b) for b in blocks]
+    if not forDraft and _hasThinking(compiled):
+        raise TelegramError(
+            "rich(): a thinking(...) block was found, but it's only accepted by "
+            "bot.messageDraft(...) — pass rich(..., forDraft=True) if this is going "
+            "to a draft, or drop thinking(...) to send it normally."
+        )
+    return {"blocks": compiled}
+
+
+def richMarkdown(text: str, media: dict = None, rtl: bool = None, skipEntityDetection: bool = None) -> dict:
+    out = {"markdown": text}
+    if media:
+        out["media"] = _compileMediaMap(media)
+    if rtl is not None:
+        out["is_rtl"] = rtl
+    if skipEntityDetection is not None:
+        out["skip_entity_detection"] = skipEntityDetection
+    return out
+
+
+def richHtml(text: str, media: dict = None, rtl: bool = None, skipEntityDetection: bool = None) -> dict:
+    out = {"html": text}
+    if media:
+        out["media"] = _compileMediaMap(media)
+    if rtl is not None:
+        out["is_rtl"] = rtl
+    if skipEntityDetection is not None:
+        out["skip_entity_detection"] = skipEntityDetection
+    return out
+
+
+def slot(name: str) -> dict:
+    return {"_slot": name}
+
+
+def _slotNames(node, order: list) -> None:
+    if isinstance(node, dict):
+        if "_slot" in node:
+            if node["_slot"] not in order:
+                order.append(node["_slot"])
+            return
+        for v in node.values():
+            _slotNames(v, order)
+    elif isinstance(node, list):
+        for v in node:
+            _slotNames(v, order)
+
+
+def _fillSlots(node, data: dict):
+    if isinstance(node, dict):
+        if "_slot" in node:
+            name = node["_slot"]
+            if name not in data:
+                raise KeyError(f"missing value for slot '{name}'")
+            return data[name]
+        return {k: _fillSlots(v, data) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_fillSlots(v, data) for v in node]
+    return node
+
+
 class TelegramError(Exception):
     def __init__(self, description: str, errorCode: int = 0, retryAfter: int = None):
         super().__init__(description)
@@ -638,6 +1075,83 @@ class TelegramError(Exception):
 
     def __str__(self) -> str:
         return f"{self.error_code}: {self.description}" if self.error_code else self.description
+
+
+class RichTemplate:
+    __slots__ = ("_blocks", "_forDraft", "_slotOrder")
+
+    def __init__(self, blocks: tuple, forDraft: bool):
+        self._blocks = blocks
+        self._forDraft = forDraft
+        order: list = []
+        for b in blocks:
+            _slotNames(b, order)
+        self._slotOrder = tuple(order)
+
+    def __call__(self, *args, **kwargs) -> dict:
+        if len(args) > len(self._slotOrder):
+            raise TypeError(
+                f"template takes {len(self._slotOrder)} positional slot(s) "
+                f"{self._slotOrder}, got {len(args)}"
+            )
+        data = dict(zip(self._slotOrder, args))
+        for name, value in kwargs.items():
+            if name in data:
+                raise TypeError(f"slot '{name}' passed both positionally and by name")
+            data[name] = value
+        filled = [_fillSlots(b, data) for b in self._blocks]
+        return rich(*filled, forDraft=self._forDraft)
+
+    @property
+    def slots(self) -> tuple:
+        return self._slotOrder
+
+    def __repr__(self) -> str:
+        return f"RichTemplate(slots={self._slotOrder!r})"
+
+
+class Rich:
+    __slots__ = ()
+
+    def __new__(cls, *blocks, forDraft=False):
+        order: list = []
+        for b in blocks:
+            _slotNames(b, order)
+        if order:
+            return RichTemplate(blocks, forDraft)
+        return rich(*blocks, forDraft=forDraft)
+
+    Build = staticmethod(rich)
+    Heading = staticmethod(heading)
+    Paragraph = staticmethod(paragraph)
+    Footer = staticmethod(footer)
+    Quote = staticmethod(quote)
+    PullQuote = staticmethod(pullQuote)
+    Item = staticmethod(item)
+    BulletList = staticmethod(bulletList)
+    CodeBlock = staticmethod(codeBlock)
+    MathBlock = staticmethod(mathBlock)
+    Anchor = staticmethod(anchor)
+    Divider = staticmethod(divider)
+    Thinking = staticmethod(thinking)
+    Details = staticmethod(details)
+    Table = staticmethod(table)
+    Map = staticmethod(mapBlock)
+    Run = staticmethod(run)
+    EmojiRun = staticmethod(emojiRun)
+    AnchorLink = staticmethod(anchorLink)
+    Ref = staticmethod(ref)
+    RefLink = staticmethod(refLink)
+    Markdown = staticmethod(richMarkdown)
+    Html = staticmethod(richHtml)
+    Slot = staticmethod(slot)
+    Photo = staticmethod(photo)
+    Video = staticmethod(video)
+    Animation = staticmethod(animation)
+    Audio = staticmethod(audio)
+    Voice = staticmethod(voiceNote)
+    Collage = staticmethod(collage)
+    Slideshow = staticmethod(slideshow)
 
 
 class CallbackData:
@@ -736,6 +1250,18 @@ class Message(ArgsMixin):
     @property
     def messageId(self) -> Optional[int]:
         return self.message_id
+
+    @property
+    def ephemeralId(self) -> Optional[int]:
+        return self._raw.get("ephemeral_message_id")
+
+    @property
+    def isEphemeral(self) -> bool:
+        return self.ephemeralId is not None
+
+    @property
+    def receiverUser(self):
+        return User.fromDict(self._raw.get("receiver_user"))
 
     @property
     def isPrivate(self) -> bool:
@@ -864,6 +1390,14 @@ class CallbackQuery(ArgsMixin):
     @property
     def messageId(self) -> Optional[int]:
         return self.message_id
+
+    @property
+    def ephemeralId(self) -> Optional[int]:
+        return getattr(self.message, "ephemeral_message_id", None)
+
+    @property
+    def isEphemeral(self) -> bool:
+        return self.ephemeralId is not None
 
     @property
     def isInline(self) -> bool:
@@ -1191,6 +1725,10 @@ class GuestQuery:
         return u.id if u else None
 
     @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
+
+    @property
     def text(self) -> Optional[str]:
         return self._raw.get("text")
 
@@ -1216,6 +1754,10 @@ class InlineQuery:
     @property
     def user_id(self) -> Optional[int]:
         return self.from_user.id if self.from_user else None
+
+    @property
+    def userId(self) -> Optional[int]:
+        return self.user_id
 
     def article(self, title: str, text: str, description: str = None, thumbUrl: str = None, resultId: str = None, **kwargs) -> dict:
         return {
@@ -1340,6 +1882,19 @@ class AsyncAPIClient:
             return self._parse(resp.content)
         return await self._with_retry(_do)
 
+    async def callWithAttachments(self, method: str, jsonField: str, jsonValue, attachments: dict, **params):
+        if not attachments:
+            return await self.call(method, **{jsonField: jsonValue}, **params)
+        fields = {jsonField: json.dumps(jsonValue)}
+        for k, v in params.items():
+            if v is not None:
+                fields[k] = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
+        async def _do():
+            resp = await self._client.post(self._url(method), data=fields, files=dict(attachments))
+            resp.raise_for_status()
+            return self._parse(resp.content)
+        return await self._with_retry(_do)
+
     async def close(self):
         try:
             await self._client.aclose()
@@ -1458,6 +2013,7 @@ class TextRoute:
 
 class _RouteResult:
     __slots__ = ("route", "args", "match")
+
     def __init__(self, route, args, match):
         self.route = route
         self.args = args
@@ -1761,6 +2317,12 @@ class Gramly:
             return coro
         return self._run_coro(coro)
 
+    def _api_callRich(self, method, jsonField, jsonValue, attachments, **params):
+        coro = self._api.callWithAttachments(method, jsonField, jsonValue, attachments, **params)
+        if _in_async_task():
+            return coro
+        return self._run_coro(coro)
+
     def _debug(self, action: str, **ctx):
         if self.debug:
             _log.debug(action, **ctx)
@@ -1856,24 +2418,35 @@ class Gramly:
             return buildReplyKeyboard(keyboard)
         return None
 
+    def _ephemeralFrom(self, to) -> tuple:
+        if isinstance(to, CallbackQuery):
+            return to.user_id, to.id, None
+        if isinstance(to, Message):
+            return to.user_id, None, to.ephemeralId
+        if isinstance(to, int):
+            return to, None, None
+        if isinstance(to, dict):
+            return userId(to), to.get("id"), to.get("ephemeral_message_id")
+        return userId(to), getattr(to, "id", None), getattr(to, "ephemeral_message_id", None)
+
     def _msgTarget(self, call):
         if isinstance(call, CallbackQuery):
             hasPhoto = bool(call.message.get("photo") if isinstance(call.message, dict) else getattr(call.message, "photo", None))
-            return call.chat_id, call.message_id, hasPhoto, call.bc_id
+            return call.chat_id, call.message_id, hasPhoto, call.bc_id, call.ephemeralId
         if isinstance(call, BusinessMessage):
-            return call.chat_id, call.message_id, bool(call._raw.get("photo")), call.bc_id
+            return call.chat_id, call.message_id, bool(call._raw.get("photo")), call.bc_id, None
         if isinstance(call, Message):
-            return call.chat_id, call.message_id, bool(call._raw.get("photo")), None
+            return call.chat_id, call.message_id, bool(call._raw.get("photo")), None, call.ephemeralId
         if isinstance(call, dict):
             msg = call.get("message", call)
-            return msg.get("chat", {}).get("id"), msg.get("message_id"), bool(msg.get("photo")), msg.get("business_connection_id")
+            return msg.get("chat", {}).get("id"), msg.get("message_id"), bool(msg.get("photo")), msg.get("business_connection_id"), msg.get("ephemeral_message_id")
         cid = getattr(call, "chat_id", None)
         if cid is None:
             chatObj = getattr(call, "chat", None)
             if chatObj is not None:
                 cid = chatObj.get("id") if isinstance(chatObj, dict) else getattr(chatObj, "id", None)
         bcId = getattr(call, "bc_id", None) or getattr(call, "business_connection_id", None)
-        return cid, getattr(call, "message_id", None), bool(getattr(call, "photo", None)), bcId
+        return cid, getattr(call, "message_id", None), bool(getattr(call, "photo", None)), bcId, getattr(call, "ephemeral_message_id", None)
 
     def _msgFrom(self, message) -> tuple:
         if isinstance(message, Message):
@@ -2188,24 +2761,64 @@ class Gramly:
         threading.Thread(target=_loop, daemon=True).start()
         return handle
 
-    def send(self, target, text: str, inline=None, keyboard=None, photo=None, **kwargs):
+    def send(self, target, text, inline=None, keyboard=None, photo=None, **kwargs):
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard)
+        if isinstance(text, dict):
+            built = text
+            cleaned, attachments = _collectRichAttachments(built)
+            self._debug("send", chat=cid, rich=True, blocks=len(built.get("blocks", [])) or None)
+            return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
+                chat_id=cid, reply_markup=markup, **kwargs)
         self._debug("send", chat=cid, text=f"{text[:40]!r}")
         if photo is not None:
             return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
-    def reply(self, message, text: str, keyboard=None, inline=None, photo=None, **kwargs):
+    def reply(self, message, text, keyboard=None, inline=None, photo=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
         chatIdVal, msgId = self._msgFrom(message)
+        if isinstance(text, dict):
+            built = text
+            cleaned, attachments = _collectRichAttachments(built)
+            return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
+                chat_id=chatIdVal, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
         if photo is not None:
             return self._api_call("sendPhoto", chat_id=chatIdVal, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
         return self._api_call("sendMessage", chat_id=chatIdVal, text=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
 
-    def edit(self, call, text: str, inline=None, photo=None, **kwargs):
-        chatIdVal, msgId, hasPhoto, bcId = self._msgTarget(call)
+    def ephemeral(self, target, text, to=None, keyboard=None, inline=None, photo=None, **kwargs):
+        cid = chatId(target)
+        markup = self._resolveMarkup(inline, keyboard)
+        receiver, callId, replyEphId = self._ephemeralFrom(to if to is not None else target)
+        replyParams = {"ephemeral_message_id": replyEphId} if replyEphId is not None else None
+        self._debug("ephemeral", chat=cid, to=receiver)
+        if photo is not None:
+            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode,
+                reply_markup=markup, receiver_user_id=receiver, callback_query_id=callId, reply_parameters=replyParams, **kwargs)
+        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode,
+            reply_markup=markup, receiver_user_id=receiver, callback_query_id=callId, reply_parameters=replyParams, **kwargs)
+
+    def edit(self, call, text, inline=None, photo=None, **kwargs):
+        chatIdVal, msgId, hasPhoto, bcId, ephId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
+        if ephId is not None:
+            self._debug("edit", chat=chatIdVal, ephemeral=ephId)
+            if photo is not None:
+                media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
+                return self._editSafe("edit", "editEphemeralMessageMedia", kind="ephemeral_media", media=media, chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
+            if hasPhoto:
+                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_text", text=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        if isinstance(text, dict):
+            built = text
+            cleaned, attachments = _collectRichAttachments(built)
+            if attachments:
+                raise ValueError("edit: rich message references local files; use a file_id or URL when editing")
+            self._debug("edit", chat=chatIdVal, msg=msgId, bc=bcId, rich=True)
+            return self._editSafe("edit", "editMessageText", kind="rich",
+                rich_message=cleaned, chat_id=chatIdVal, message_id=msgId,
+                business_connection_id=bcId, reply_markup=markup, **kwargs)
         self._debug("edit", chat=chatIdVal, msg=msgId, bc=bcId)
         if photo is not None:
             media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
@@ -2215,12 +2828,14 @@ class Gramly:
         return self._editSafe("edit", "editMessageText", kind="text", text=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
     def editMarkup(self, call, inline=None):
-        chatIdVal, msgId, _, bcId = self._msgTarget(call)
+        chatIdVal, msgId, _, bcId, ephId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
+        if ephId is not None:
+            return self._editSafe("editMarkup", "editEphemeralMessageReplyMarkup", kind="ephemeral", chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup)
         return self._editSafe("editMarkup", "editMessageReplyMarkup", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
 
     def replace(self, call, text: str, inline=None, photo=None, **kwargs):
-        chatIdVal, msgId, hasPhoto, bcId = self._msgTarget(call)
+        chatIdVal, msgId, hasPhoto, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if photo is not None:
             media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
@@ -2234,12 +2849,12 @@ class Gramly:
         return self._editSafe("replace", "editMessageText", text=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
     def editLiveLocation(self, call, latitude: float, longitude: float, inline=None, **kwargs):
-        chatIdVal, msgId, _, bcId = self._msgTarget(call)
+        chatIdVal, msgId, _, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         return self._api_call("editMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, latitude=latitude, longitude=longitude, reply_markup=markup, **kwargs)
 
     def stopLiveLocation(self, call, inline=None, **kwargs):
-        chatIdVal, msgId, _, bcId = self._msgTarget(call)
+        chatIdVal, msgId, _, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         return self._api_call("stopMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
 
@@ -2263,8 +2878,11 @@ class Gramly:
 
     def delete(self, message) -> bool:
         try:
-            chatIdVal, msgId = self._msgFrom(message)
-            self._api_call("deleteMessage", chat_id=chatIdVal, message_id=msgId)
+            chatIdVal, msgId, _, _, ephId = self._msgTarget(message)
+            if ephId is not None:
+                self._api_call("deleteEphemeralMessage", chat_id=chatIdVal, ephemeral_message_id=ephId)
+            else:
+                self._api_call("deleteMessage", chat_id=chatIdVal, message_id=msgId)
             return True
         except Exception:
             return False
@@ -2275,7 +2893,7 @@ class Gramly:
         self._pendingTimers.append(timer)
         timer.start()
         return timer
-    
+
     def forward(self, target, message):
         fromChat, msgId = self._msgFrom(message)
         return self._api_call("forwardMessage", chat_id=chatId(target), from_chat_id=fromChat, message_id=msgId)
@@ -2295,7 +2913,7 @@ class Gramly:
 
     def pin(self, message, notify: bool = False):
         try:
-            chatIdVal, msgId, _, bcId = self._msgTarget(message)
+            chatIdVal, msgId, _, bcId, _ = self._msgTarget(message)
             self._api_call("pinChatMessage", chat_id=chatIdVal, message_id=msgId, disable_notification=not notify, business_connection_id=bcId)
         except Exception as e:
             _log.warning("pin", err=e)
@@ -2345,7 +2963,7 @@ class Gramly:
         return self.paidMedia(target, starCount, media, business_connection_id=bcId, **kwargs)
 
     def react(self, msg, *emojis, isBig=False):
-        cid, mid, _, _ = self._msgTarget(msg)
+        cid, mid, _, _, _ = self._msgTarget(msg)
         reaction = []
         for e in emojis:
             if isinstance(e, str) and e.isdigit():
@@ -2545,16 +3163,13 @@ class Gramly:
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendLivePhoto", chat_id=chatId(target), photo=photo, animation=animation, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
-    def messageDraft(self, target, draftId: str, text: str = "", **kwargs):
+    def messageDraft(self, target, draftId: int, text="", inline=None, keyboard=None, **kwargs):
+        if isinstance(text, dict):
+            markup = self._resolveMarkup(inline, keyboard)
+            cleaned, attachments = _collectRichAttachments(text)
+            return self._api_callRich("sendRichMessageDraft", "rich_message", cleaned, attachments,
+                chat_id=chatId(target), draft_id=draftId, reply_markup=markup, **kwargs)
         return self._api_call("sendMessageDraft", chat_id=chatId(target), draft_id=draftId, text=text, **kwargs)
-
-    def richMessage(self, target, richMessage, inline=None, keyboard=None, **kwargs):
-        markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendRichMessage", chat_id=chatId(target), rich_message=richMessage, reply_markup=markup, **kwargs)
-
-    def richMessageDraft(self, target, draftId: str, richMessage, inline=None, keyboard=None, **kwargs):
-        markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendRichMessageDraft", chat_id=chatId(target), draft_id=draftId, rich_message=richMessage, reply_markup=markup, **kwargs)
 
     def checklist(self, target, title: str, tasks: list, **kwargs):
         return self._api_call("sendChecklist", chat_id=chatId(target), title=title, tasks=tasks, **kwargs)
