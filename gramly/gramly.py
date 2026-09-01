@@ -72,33 +72,34 @@ DEFAULT_PERMISSIONS: dict = {
 }
 
 HANDLER_UPDATES: dict = {
-    "_messageHandlers":        ["message"],
-    "_editedHandlers":         ["edited_message", "edited_business_message", "edited_channel_post"],
-    "_postHandlers":           ["channel_post"],
-    "_callbackHandlers":       ["callback_query"],
-    "_inlineHandlers":         ["inline_query"],
-    "_mediaHandlers":          ["message"],
-    "_anyHandlers":            ["message"],
-    "_myStatusHandlers":       ["my_chat_member"],
-    "_memberHandlers":         ["chat_member"],
-    "_joinHandlers":           ["chat_join_request"],
-    "_reactionHandlers":       ["message_reaction"],
-    "_pollHandlers":           ["poll_answer"],
-    "_boostHandlers":          ["chat_boost", "removed_chat_boost"],
-    "_checkoutHandlers":       ["pre_checkout_query"],
-    "_paymentHandlers":        ["message"],
-    "_webappHandlers":         ["message"],
-    "_paidMediaHandlers":      ["purchased_paid_media"],
-    "_guestHandlers":          ["guest_message"],
-    "_managedHandlers":        ["managed_bot"],
-    "_bizMsgHandlers":         ["business_message"],
-    "_bizEditedHandlers":      ["edited_business_message"],
-    "_bizDeletedHandlers":     ["deleted_business_messages"],
-    "_bizConnectionHandlers":  ["business_connection"],
-    "_commandBlocks":          ["message", "callback_query"],
+    "_messageHandlers": ["message"],
+    "_editedHandlers": ["edited_message", "edited_business_message", "edited_channel_post"],
+    "_postHandlers": ["channel_post"],
+    "_callbackHandlers": ["callback_query"],
+    "_inlineHandlers": ["inline_query"],
+    "_mediaHandlers": ["message"],
+    "_anyHandlers": ["message"],
+    "_myStatusHandlers": ["my_chat_member"],
+    "_memberHandlers": ["chat_member"],
+    "_joinHandlers": ["chat_join_request"],
+    "_reactionHandlers": ["message_reaction"],
+    "_pollHandlers": ["poll_answer"],
+    "_boostHandlers": ["chat_boost", "removed_chat_boost"],
+    "_checkoutHandlers": ["pre_checkout_query"],
+    "_paymentHandlers": ["message"],
+    "_webappHandlers": ["message"],
+    "_paidMediaHandlers": ["purchased_paid_media"],
+    "_guestHandlers": ["guest_message"],
+    "_managedHandlers": ["managed_bot"],
+    "_generationStoppedHandlers": ["stopped_message_generation"],
+    "_bizMsgHandlers": ["business_message"],
+    "_bizEditedHandlers": ["edited_business_message"],
+    "_bizDeletedHandlers": ["deleted_business_messages"],
+    "_bizConnectionHandlers": ["business_connection"],
+    "_commandBlocks": ["message", "callback_query"],
 }
-__version__ = "1.3.2"
-__bot_api_version__ = "10.2"
+__version__ = "1.3.3"
+__bot_api_version__ = "10.3"
 
 
 __all__ = [
@@ -197,10 +198,10 @@ def isNotModified(e: Exception) -> bool:
 
 
 _MEDIA_META: dict = {
-    "photo":    ("image/jpeg",                "jpg"),
-    "video":    ("video/mp4",                 "mp4"),
-    "audio":    ("audio/mpeg",                "mp3"),
-    "document": ("application/octet-stream",  "bin"),
+    "photo": ("image/jpeg", "jpg"),
+    "video": ("video/mp4", "mp4"),
+    "audio": ("audio/mpeg", "mp3"),
+    "document": ("application/octet-stream", "bin"),
 }
 
 _EXT_TYPE: dict = {
@@ -432,12 +433,15 @@ def userRequest(
     requestPhoto: bool = None,
 ) -> _UserRequest:
     d = _UserRequest({"request_id": requestId})
-    if isBot          is not None: d["user_is_bot"]       = isBot
-    if isPremium      is not None: d["user_is_premium"]   = isPremium
-    if maxQuantity    is not None: d["max_quantity"]       = maxQuantity
-    if requestName    is not None: d["request_name"]       = requestName
-    if requestUsername is not None: d["request_username"]  = requestUsername
-    if requestPhoto   is not None: d["request_photo"]      = requestPhoto
+    fields = (
+        ("user_is_bot", isBot),
+        ("user_is_premium", isPremium),
+        ("max_quantity", maxQuantity),
+        ("request_name", requestName),
+        ("request_username", requestUsername),
+        ("request_photo", requestPhoto),
+    )
+    d.update((key, value) for key, value in fields if value is not None)
     return d
 
 
@@ -456,16 +460,19 @@ def chatRequest(
     botAdminRights: dict = None,
 ) -> _ChatRequest:
     d = _ChatRequest({"request_id": requestId})
-    if isChannel        is not None: d["chat_is_channel"]           = isChannel
-    if isForum          is not None: d["chat_is_forum"]             = isForum
-    if hasUsername      is not None: d["chat_has_username"]         = hasUsername
-    if isCreated        is not None: d["chat_is_created"]           = isCreated
-    if botIsMember      is not None: d["bot_is_member"]             = botIsMember
-    if requestTitle     is not None: d["request_title"]             = requestTitle
-    if requestUsername  is not None: d["request_username"]          = requestUsername
-    if requestPhoto     is not None: d["request_photo"]             = requestPhoto
-    if userAdminRights  is not None: d["user_administrator_rights"] = userAdminRights
-    if botAdminRights   is not None: d["bot_administrator_rights"]  = botAdminRights
+    fields = (
+        ("chat_is_channel", isChannel),
+        ("chat_is_forum", isForum),
+        ("chat_has_username", hasUsername),
+        ("chat_is_created", isCreated),
+        ("bot_is_member", botIsMember),
+        ("request_title", requestTitle),
+        ("request_username", requestUsername),
+        ("request_photo", requestPhoto),
+        ("user_administrator_rights", userAdminRights),
+        ("bot_administrator_rights", botAdminRights),
+    )
+    d.update((key, value) for key, value in fields if value is not None)
     return d
 
 
@@ -485,6 +492,7 @@ def btn(text: str, action=None, *,
 
     style: str = None,
     emoji: str = None,
+    disabled=None,
 ) -> dict:
     kwarg_choices = (
         url, miniApp, loginUrl, switchInline,
@@ -493,13 +501,13 @@ def btn(text: str, action=None, *,
     )
     total = (1 if action is not None else 0) + sum(x is not None for x in kwarg_choices)
 
-    if total == 0:
+    if total == 0 and not disabled:
         raise ValueError(
             f"btn('{text}'): no action - pass callback_data string, "
             "userRequest(...), chatRequest(...), or a keyword action: "
             "url / miniApp / loginUrl / switchInline / switchInlineCurrent / "
             "switchInlineChosen / copyText / pay / "
-            "requestPoll / requestContact / requestLocation"
+            "requestPoll / requestContact / requestLocation / disabled"
         )
     if total > 1:
         raise ValueError(f"btn('{text}'): exactly one action allowed, got {total}")
@@ -517,23 +525,24 @@ def btn(text: str, action=None, *,
     if requestPoll is not None and requestPoll not in ("regular", "quiz"):
         raise ValueError(f"requestPoll must be 'regular' or 'quiz', got {requestPoll!r}")
     return {
-        "text":                  text,
-        "data":                  action if isinstance(action, str) else None,
-        "url":                   url,
-        "mini_app":              miniApp,
-        "login_url":             loginUrl,
-        "switch_inline":         switchInline,
+        "text": text,
+        "data": action if isinstance(action, str) else None,
+        "url": url,
+        "mini_app": miniApp,
+        "login_url": loginUrl,
+        "switch_inline": switchInline,
         "switch_inline_current": switchInlineCurrent,
-        "switch_inline_chosen":  switchInlineChosen,
-        "copy_text":             copyText,
-        "pay":                   pay,
-        "request_user":          dict(action) if isinstance(action, _UserRequest) else None,
-        "request_chat":          dict(action) if isinstance(action, _ChatRequest) else None,
-        "request_poll":          requestPoll,
-        "request_contact":       requestContact or None,
-        "request_location":      requestLocation or None,
-        "style":                 style,
-        "emoji":                 emoji,
+        "switch_inline_chosen": switchInlineChosen,
+        "copy_text": copyText,
+        "pay": pay,
+        "request_user": dict(action) if isinstance(action, _UserRequest) else None,
+        "request_chat": dict(action) if isinstance(action, _ChatRequest) else None,
+        "request_poll": requestPoll,
+        "request_contact": requestContact or None,
+        "request_location": requestLocation or None,
+        "style": style,
+        "emoji": emoji,
+        "disabled": disabled,
     }
 
 
@@ -545,61 +554,81 @@ def kbd(*rows) -> list:
     return list(rows)
 
 
-def buildInlineKeyboard(rows) -> dict:
+def _wireInlineButton(item: dict) -> Optional[dict]:
+    if not isinstance(item, dict):
+        return None
+    data = item.get("data")
+    if data is not None and len(data.encode()) > _CB_LIMIT:
+        raise ValueError(f"callback_data too long ({len(data.encode())} bytes): {data!r}")
+    if data is not None and not data:
+        raise ValueError("callback_data cannot be empty")
+    b = {"text": item["text"]}
+    if item.get("disabled"):
+        b["disabled"] = {}
+    elif data is not None:
+        b["callback_data"] = data
+    if item.get("url"):
+        b["url"] = item["url"]
+    if item.get("mini_app"):
+        b["web_app"] = {"url": item["mini_app"]}
+    if item.get("login_url"):
+        b["login_url"] = item["login_url"]
+    if item.get("switch_inline") is not None:
+        b["switch_inline_query"] = item["switch_inline"]
+    if item.get("switch_inline_current") is not None:
+        b["switch_inline_query_current_chat"] = item["switch_inline_current"]
+    if item.get("switch_inline_chosen") is not None:
+        b["switch_inline_query_chosen_chat"] = item["switch_inline_chosen"]
+    if item.get("copy_text") is not None:
+        b["copy_text"] = {"text": item["copy_text"]}
+    if item.get("pay"):
+        b["pay"] = True
+    if item.get("style"):
+        b["style"] = item["style"]
+    if item.get("emoji"):
+        b["icon_custom_emoji_id"] = item["emoji"]
+    return b
+
+
+def buildInlineKeyboard(rows, forceReply: bool = None) -> dict:
     if not rows:
-        return {"inline_keyboard": []}
-    if not isinstance(rows, list) or (rows and not isinstance(rows[0], (list, dict))):
+        markup = {"inline_keyboard": []}
+        if forceReply:
+            markup["force_reply"] = True
+        return markup
+    if isinstance(rows, dict):
+        rows = [[rows]]
+    elif isinstance(rows, list) and rows and all(isinstance(x, dict) for x in rows):
         rows = [rows]
+    elif not isinstance(rows, list):
+        rows = [[rows]]
     keyboard = []
     for r in rows:
         if not isinstance(r, list):
             r = [r]
         rowBtns = []
         for item in r:
-            if not isinstance(item, dict):
-                continue
-            data = item.get("data")
-            if data is not None and len(data.encode()) > _CB_LIMIT:
-                raise ValueError(f"callback_data too long ({len(data.encode())} bytes): {data!r}")
-            if data is not None and not data:
-                raise ValueError("callback_data cannot be empty")
-            b = {"text": item["text"]}
-            if data is not None:
-                b["callback_data"] = data
-            if item.get("url"):
-                b["url"] = item["url"]
-            if item.get("mini_app"):
-                b["web_app"] = {"url": item["mini_app"]}
-            if item.get("login_url"):
-                b["login_url"] = item["login_url"]
-            if item.get("switch_inline") is not None:
-                b["switch_inline_query"] = item["switch_inline"]
-            if item.get("switch_inline_current") is not None:
-                b["switch_inline_query_current_chat"] = item["switch_inline_current"]
-            if item.get("switch_inline_chosen") is not None:
-                b["switch_inline_query_chosen_chat"] = item["switch_inline_chosen"]
-            if item.get("copy_text") is not None:
-                b["copy_text"] = {"text": item["copy_text"]}
-            if item.get("pay"):
-                b["pay"] = True
-            if item.get("style"):
-                b["style"] = item["style"]
-            if item.get("emoji"):
-                b["icon_custom_emoji_id"] = item["emoji"]
-            rowBtns.append(b)
+            b = _wireInlineButton(item)
+            if b is not None:
+                rowBtns.append(b)
         if rowBtns:
             keyboard.append(rowBtns)
-    return {"inline_keyboard": keyboard}
+    markup = {"inline_keyboard": keyboard}
+    if forceReply:
+        markup["force_reply"] = True
+    return markup
 
 
-def buildReplyKeyboard(rows) -> dict:
+def buildReplyKeyboard(rows, forceReply: bool = None) -> dict:
     if rows is False:
         return {"remove_keyboard": True}
-    if isinstance(rows, str):
+    if isinstance(rows, (str, dict)):
         rows = [[rows]]
+    elif isinstance(rows, list) and rows and all(isinstance(x, (str, dict)) for x in rows):
+        rows = [rows]
     keyboard = []
     for r in rows:
-        if isinstance(r, str):
+        if isinstance(r, (str, dict)):
             r = [r]
         rowBtns = []
         for b in r:
@@ -626,7 +655,10 @@ def buildReplyKeyboard(rows) -> dict:
                 rowBtns.append(btnObj)
         if rowBtns:
             keyboard.append(rowBtns)
-    return {"keyboard": keyboard, "resize_keyboard": True}
+    markup = {"keyboard": keyboard, "resize_keyboard": True}
+    if forceReply:
+        markup["force_reply"] = True
+    return markup
 
 
 def _compileRuns(parts) -> list:
@@ -687,16 +719,17 @@ def _resolveMediaSource(item, index: int = 0) -> dict:
     return {"media": s}
 
 
-def _resolveInputMedia(item, mediaType: str = None, index: int = 0, **fields) -> dict:
+def _resolveInputMedia(item, mediaType: str = None, index: int = 0, documentFallback: str = "photo", extensionlessOnly: bool = False, **fields) -> dict:
     resolved = _resolveMediaSource(item, index)
     if mediaType is None:
         if "_bytes" in resolved:
             mediaType = _typeFromBytes(resolved["_bytes"]) if not resolved.get("_filename") \
                 else _typeFromPath(resolved["_filename"])
         else:
+            hasExtension = "." in str(item).rsplit("/", 1)[-1]
             mediaType = _typeFromPath(str(item))
-        if mediaType == "document":
-            mediaType = "photo"
+            if mediaType == "document" and documentFallback and not (extensionlessOnly and hasExtension):
+                mediaType = documentFallback
     entry = {"type": mediaType, "media": resolved["media"]}
     if "_bytes" in resolved:
         entry["_bytes"], entry["_filename"], entry["_content_type"] = (
@@ -801,6 +834,13 @@ def emojiRun(customEmojiId: str, alt: str = "🙂") -> dict:
     return {"type": "custom_emoji", "custom_emoji_id": customEmojiId, "alternative_text": alt}
 
 
+def buttonRun(button: dict) -> dict:
+    wired = _wireInlineButton(button)
+    if wired is None:
+        raise TypeError(f"buttonRun(): expected a btn(...) object, got {type(button).__name__!r}")
+    return {"type": "button", "button": wired}
+
+
 def anchor(name: str) -> dict:
     return {"type": "anchor", "name": name}
 
@@ -833,6 +873,15 @@ def quote(*parts, credit=None) -> dict:
     d = {"type": "blockquote", "blocks": _asBlocks(parts)}
     if credit:
         d["credit"] = _compileRuns(credit)
+    return d
+
+
+def expandableQuote(*parts, credit=None, expanded: bool = False) -> dict:
+    d = {"type": "expandable_blockquote", "blocks": _asBlocks(parts)}
+    if credit:
+        d["credit"] = _compileRuns(credit)
+    if expanded:
+        d["is_expanded"] = True
     return d
 
 
@@ -882,6 +931,25 @@ def divider() -> dict:
     return {"type": "divider"}
 
 
+def buttonsBlock(*buttons, align: str = None) -> dict:
+    flat = []
+    def _collect(item):
+        if isinstance(item, list):
+            for sub in item:
+                _collect(sub)
+        elif item is not None:
+            flat.append(item)
+    for b in buttons:
+        _collect(b)
+    wired = [b for b in (_wireInlineButton(item) for item in flat) if b is not None]
+    d = {"type": "buttons", "buttons": wired}
+    if align is not None:
+        if align not in ("left", "center", "right"):
+            raise ValueError(f"buttonsBlock(): align must be left/center/right, got {align!r}")
+        d["align"] = align
+    return d
+
+
 def thinking(*parts) -> dict:
     return {"type": "thinking", "text": _compileRuns(parts)}
 
@@ -895,7 +963,7 @@ def details(summary, *parts, open: bool = False) -> dict:
 
 
 def table(rows: list, headerRow: bool = True, bordered: bool = None,
-          striped: bool = None, caption=None) -> dict:
+          striped: bool = None, compact: bool = None, caption=None) -> dict:
     def cell(c, isHeaderRow: bool):
         if isinstance(c, dict):
             d = {"align": c.get("align", "left"), "valign": c.get("valign", "middle")}
@@ -920,6 +988,8 @@ def table(rows: list, headerRow: bool = True, bordered: bool = None,
         d["is_bordered"] = bordered
     if striped is not None:
         d["is_striped"] = striped
+    if compact is not None:
+        d["is_compact"] = compact
     if caption:
         d["caption"] = _compileRuns(caption)
     return d
@@ -975,6 +1045,10 @@ def audio(media, caption=None, credit=None, title: str = None, performer: str = 
 
 def voiceNote(media, caption=None, credit=None, duration: int = None) -> dict:
     return _mediaBlockOf("voice_note", "voice_note", media, caption, credit, duration=duration)
+
+
+def document(media, caption=None, credit=None, fileName: str = None) -> dict:
+    return _mediaBlockOf("document", "document", media, caption, credit, file_name=fileName)
 
 
 def _mediaGroup(kind: str, items: list, caption=None, credit=None) -> dict:
@@ -1036,32 +1110,34 @@ def richHtml(text: str, media: dict = None, rtl: bool = None, skipEntityDetectio
     return out
 
 
-def slot(name: str) -> dict:
-    return {"_slot": name}
+_SLOT_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 
 def _slotNames(node, order: list) -> None:
-    if isinstance(node, dict):
-        if "_slot" in node:
-            if node["_slot"] not in order:
-                order.append(node["_slot"])
-            return
+    if isinstance(node, str):
+        for m in _SLOT_PATTERN.finditer(node):
+            name = m.group(1)
+            if name not in order:
+                order.append(name)
+    elif isinstance(node, dict):
         for v in node.values():
             _slotNames(v, order)
-    elif isinstance(node, list):
+    elif isinstance(node, (list, tuple)):
         for v in node:
             _slotNames(v, order)
 
 
 def _fillSlots(node, data: dict):
-    if isinstance(node, dict):
-        if "_slot" in node:
-            name = node["_slot"]
+    if isinstance(node, str):
+        def _sub(m: "re.Match") -> str:
+            name = m.group(1)
             if name not in data:
-                raise KeyError(f"missing value for slot '{name}'")
-            return data[name]
+                raise KeyError(f"missing value for slot '{{{name}}}'")
+            return str(data[name])
+        return _SLOT_PATTERN.sub(_sub, node)
+    if isinstance(node, dict):
         return {k: _fillSlots(v, data) for k, v in node.items()}
-    if isinstance(node, list):
+    if isinstance(node, (list, tuple)):
         return [_fillSlots(v, data) for v in node]
     return node
 
@@ -1126,6 +1202,7 @@ class Rich:
     Paragraph = staticmethod(paragraph)
     Footer = staticmethod(footer)
     Quote = staticmethod(quote)
+    ExpandableQuote = staticmethod(expandableQuote)
     PullQuote = staticmethod(pullQuote)
     Item = staticmethod(item)
     BulletList = staticmethod(bulletList)
@@ -1139,17 +1216,19 @@ class Rich:
     Map = staticmethod(mapBlock)
     Run = staticmethod(run)
     EmojiRun = staticmethod(emojiRun)
+    ButtonRun = staticmethod(buttonRun)
+    Buttons = staticmethod(buttonsBlock)
     AnchorLink = staticmethod(anchorLink)
     Ref = staticmethod(ref)
     RefLink = staticmethod(refLink)
     Markdown = staticmethod(richMarkdown)
     Html = staticmethod(richHtml)
-    Slot = staticmethod(slot)
     Photo = staticmethod(photo)
     Video = staticmethod(video)
     Animation = staticmethod(animation)
     Audio = staticmethod(audio)
     Voice = staticmethod(voiceNote)
+    Document = staticmethod(document)
     Collage = staticmethod(collage)
     Slideshow = staticmethod(slideshow)
 
@@ -1211,7 +1290,19 @@ class ArgsMixin:
         return sep.join(self.args)
 
 
-class Message(ArgsMixin):
+class RawAttrMixin:
+    __slots__ = ()
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name not in self._raw:
+            raise AttributeError(name)
+        v = self._raw[name]
+        return wrap(v) if isinstance(v, (dict, list)) else v
+
+
+class Message(ArgsMixin, RawAttrMixin):
     __slots__ = ("_raw", "args", "match", "from_user", "chat", "text", "message_id")
 
     def __init__(self, raw: dict, args: list, match=None):
@@ -1316,6 +1407,18 @@ class Message(ArgsMixin):
         return wrap(self._raw.get("live_photo"))
 
     @property
+    def communityChatAdded(self):
+        return wrap(self._raw.get("community_chat_added"))
+
+    @property
+    def communityChatJoined(self):
+        return wrap(self._raw.get("community_chat_joined"))
+
+    @property
+    def communityChatRemoved(self):
+        return wrap(self._raw.get("community_chat_removed"))
+
+    @property
     def isGuest(self) -> bool:
         return self._raw.get("guest_query_id") is not None
 
@@ -1331,19 +1434,11 @@ class Message(ArgsMixin):
     def guestCallerChat(self):
         return Chat.fromDict(self._raw.get("guest_bot_caller_chat"))
 
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if name not in self._raw:
-            raise AttributeError(name)
-        v = self._raw[name]
-        return wrap(v) if isinstance(v, (dict, list)) else v
-
     def __repr__(self) -> str:
         return f"Message({self.message_id}, {self.text!r})"
 
 
-class CallbackQuery(ArgsMixin):
+class CallbackQuery(ArgsMixin, RawAttrMixin):
     __slots__ = ("_raw", "cb", "args", "data", "message", "from_user", "chat", "id", "_answered", "bc_id")
 
     def __init__(self, raw: dict, cb: CallbackData, args: list = None):
@@ -1406,14 +1501,6 @@ class CallbackQuery(ArgsMixin):
     @property
     def inlineMessageId(self) -> Optional[str]:
         return self._raw.get("inline_message_id")
-
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if name not in self._raw:
-            raise AttributeError(name)
-        v = self._raw[name]
-        return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
         return f"CallbackQuery({self.id!r}, {self.data!r})"
@@ -1511,7 +1598,7 @@ class PreCheckout:
         return f"PreCheckout({self.currency} {self.totalAmount} payload={self.payload!r})"
 
 
-class JoinRequest:
+class JoinRequest(RawAttrMixin):
     __slots__ = ("_raw",)
 
     def __init__(self, raw: dict):
@@ -1563,19 +1650,11 @@ class JoinRequest:
     def date(self) -> Optional[int]:
         return self._raw.get("date")
 
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if name not in self._raw:
-            raise AttributeError(name)
-        v = self._raw[name]
-        return wrap(v) if isinstance(v, (dict, list)) else v
-
     def __repr__(self) -> str:
         return f"JoinRequest(user={self.user_id}, chat={self.chat_id})"
 
 
-class BusinessConnection:
+class BusinessConnection(RawAttrMixin):
     __slots__ = ("_raw",)
 
     def __init__(self, raw: dict):
@@ -1610,19 +1689,11 @@ class BusinessConnection:
     def rights(self):
         return wrap(self._raw.get("rights"))
 
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if name not in self._raw:
-            raise AttributeError(name)
-        v = self._raw[name]
-        return wrap(v) if isinstance(v, (dict, list)) else v
-
     def __repr__(self) -> str:
         return f"BusinessConnection(id={self.id!r}, enabled={self.isEnabled})"
 
 
-class BusinessMessage(ArgsMixin):
+class BusinessMessage(ArgsMixin, RawAttrMixin):
     __slots__ = (
         "_raw", "_gramly", "args", "match",
         "bc_id", "chat_id", "message_id", "text", "from_user", "chat",
@@ -1687,14 +1758,6 @@ class BusinessMessage(ArgsMixin):
 
     def unpin(self):
         return self._gramly.unpin(self.chat_id, self.message_id, bcId=self.bc_id)
-
-    def __getattr__(self, name):
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if name not in self._raw:
-            raise AttributeError(name)
-        v = self._raw[name]
-        return wrap(v) if isinstance(v, (dict, list)) else v
 
     def __repr__(self) -> str:
         return f"BusinessMessage(chat={self.chat_id}, bc_id={self.bc_id!r}, text={self.text!r})"
@@ -2231,32 +2294,18 @@ class Gramly:
         self._userCbLocks = {}
         self._userCbLocksLock = asyncio.Lock()
 
-        self._messageHandlers = []
-        self._callbackHandlers = []
-        self._inlineHandlers = []
-        self._editedHandlers = []
-        self._postHandlers = []
-        self._mediaHandlers = []
-        self._anyHandlers = []
-        self._myStatusHandlers = []
-        self._memberHandlers = []
-        self._joinHandlers = []
-        self._reactionHandlers = []
-        self._pollHandlers = []
-        self._boostHandlers = []
-        self._checkoutHandlers = []
-        self._paymentHandlers = []
-        self._webappHandlers = []
-        self._paidMediaHandlers = []
-        self._guestHandlers = []
-        self._managedHandlers = []
-        self._commandBlocks = []
-        self._stopCallbacks = []
+        handlerAttrs = (
+            "_messageHandlers", "_callbackHandlers", "_inlineHandlers", "_editedHandlers",
+            "_postHandlers", "_mediaHandlers", "_anyHandlers", "_myStatusHandlers",
+            "_memberHandlers", "_joinHandlers", "_reactionHandlers", "_pollHandlers",
+            "_boostHandlers", "_checkoutHandlers", "_paymentHandlers", "_webappHandlers",
+            "_paidMediaHandlers", "_guestHandlers", "_managedHandlers", "_generationStoppedHandlers",
+            "_commandBlocks", "_stopCallbacks",
+            "_bizMsgHandlers", "_bizEditedHandlers", "_bizDeletedHandlers", "_bizConnectionHandlers",
+        )
+        for attr in handlerAttrs:
+            setattr(self, attr, [])
 
-        self._bizMsgHandlers = []
-        self._bizEditedHandlers = []
-        self._bizDeletedHandlers = []
-        self._bizConnectionHandlers = []
         self._bizConnCache = LRUCache(1000)
         self._bizConnCacheLock = threading.Lock()
 
@@ -2411,12 +2460,26 @@ class Gramly:
     def _resolveParseMode(self, **kwargs) -> str:
         return kwargs.pop("parse_mode", None) or self.parse_mode
 
-    def _resolveMarkup(self, inline=None, keyboard=None):
+    def _resolveMarkup(self, inline=None, keyboard=None, forceReply: bool = None):
         if inline is not None:
-            return buildInlineKeyboard(inline)
+            return buildInlineKeyboard(inline, forceReply=forceReply)
         if keyboard is not None:
-            return buildReplyKeyboard(keyboard)
+            return buildReplyKeyboard(keyboard, forceReply=forceReply)
+        if forceReply:
+            return {"force_reply": True}
         return None
+
+    def _ephemeralParams(self, receiver, callId, replaceCallbackMessage: bool = None) -> Optional[dict]:
+        if receiver is None and callId is None and not replaceCallbackMessage:
+            return None
+        params = {}
+        if receiver is not None:
+            params["receiver_user_id"] = receiver
+        if callId is not None:
+            params["callback_query_id"] = callId
+        if replaceCallbackMessage is not None:
+            params["replace_callback_query_message"] = replaceCallbackMessage
+        return params
 
     def _ephemeralFrom(self, to) -> tuple:
         if isinstance(to, CallbackQuery):
@@ -2692,6 +2755,10 @@ class Gramly:
         self._managedHandlers.append(fn)
         return fn
 
+    def onGenerationStopped(self, fn):
+        self._generationStoppedHandlers.append(fn)
+        return fn
+
     def onBusinessConnection(self, fn):
         self._bizConnectionHandlers.append(fn)
         return fn
@@ -2761,9 +2828,9 @@ class Gramly:
         threading.Thread(target=_loop, daemon=True).start()
         return handle
 
-    def send(self, target, text, inline=None, keyboard=None, photo=None, **kwargs):
+    def send(self, target, text, inline=None, keyboard=None, photo=None, forceReply: bool = None, **kwargs):
         cid = chatId(target)
-        markup = self._resolveMarkup(inline, keyboard)
+        markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
         if isinstance(text, dict):
             built = text
             cleaned, attachments = _collectRichAttachments(built)
@@ -2775,8 +2842,8 @@ class Gramly:
             return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
-    def reply(self, message, text, keyboard=None, inline=None, photo=None, **kwargs):
-        markup = self._resolveMarkup(inline, keyboard)
+    def reply(self, message, text, keyboard=None, inline=None, photo=None, forceReply: bool = None, **kwargs):
+        markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
         chatIdVal, msgId = self._msgFrom(message)
         if isinstance(text, dict):
             built = text
@@ -2787,28 +2854,45 @@ class Gramly:
             return self._api_call("sendPhoto", chat_id=chatIdVal, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
         return self._api_call("sendMessage", chat_id=chatIdVal, text=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
 
-    def ephemeral(self, target, text, to=None, keyboard=None, inline=None, photo=None, **kwargs):
+    def ephemeral(self, target, text, to=None, keyboard=None, inline=None, photo=None,
+                  replaceCallbackMessage: bool = None, **kwargs):
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard)
         receiver, callId, replyEphId = self._ephemeralFrom(to if to is not None else target)
         replyParams = {"ephemeral_message_id": replyEphId} if replyEphId is not None else None
+        ephParams = self._ephemeralParams(receiver, callId, replaceCallbackMessage)
         self._debug("ephemeral", chat=cid, to=receiver)
+        if isinstance(text, dict):
+            built = text
+            cleaned, attachments = _collectRichAttachments(built)
+            self._debug("ephemeral", chat=cid, to=receiver, rich=True)
+            return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
+                chat_id=cid, reply_markup=markup, ephemeral_message_parameters=ephParams,
+                reply_parameters=replyParams, **kwargs)
         if photo is not None:
             return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode,
-                reply_markup=markup, receiver_user_id=receiver, callback_query_id=callId, reply_parameters=replyParams, **kwargs)
+                reply_markup=markup, ephemeral_message_parameters=ephParams, reply_parameters=replyParams, **kwargs)
         return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode,
-            reply_markup=markup, receiver_user_id=receiver, callback_query_id=callId, reply_parameters=replyParams, **kwargs)
+            reply_markup=markup, ephemeral_message_parameters=ephParams, reply_parameters=replyParams, **kwargs)
 
-    def edit(self, call, text, inline=None, photo=None, **kwargs):
+    def edit(self, call, text, inline=None, photo=None, showCaption: bool = None, **kwargs):
         chatIdVal, msgId, hasPhoto, bcId, ephId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if ephId is not None:
             self._debug("edit", chat=chatIdVal, ephemeral=ephId)
             if photo is not None:
-                media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
-                return self._editSafe("edit", "editEphemeralMessageMedia", kind="ephemeral_media", media=media, chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
+                media = _resolveInputMedia(photo, "photo", caption=text, parse_mode=self.parse_mode,
+                                            show_caption_above_media=showCaption)
+                cleanedMedia, attachments = _collectRichAttachments(media)
+                return self._api_callRich("editEphemeralMessageMedia", "media", cleanedMedia, attachments,
+                    chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
             if hasPhoto:
-                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, show_caption_above_media=showCaption, reply_markup=markup, **kwargs)
+            if isinstance(text, dict):
+                cleaned, attachments = _collectRichAttachments(text)
+                if attachments:
+                    raise ValueError("edit: rich message references local files; use a file_id or URL when editing an ephemeral message")
+                return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_rich", rich_message=cleaned, chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
             return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_text", text=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         if isinstance(text, dict):
             built = text
@@ -2976,54 +3060,8 @@ class Gramly:
             _log.warning("react", chat=cid, msg=mid, err=e)
 
     def _normalizeMediaItem(self, index: int, item, caption: str = None) -> dict:
-        if hasattr(item, "read"):
-            item = (item.read(), getattr(item, "name", None))
-
-        if isinstance(item, tuple) and len(item) == 2:
-            data, hint = item
-            if isinstance(data, (bytes, bytearray)):
-                mtype = _typeFromPath(hint) if isinstance(hint, str) and hint else _typeFromBytes(bytes(data))
-                ct, ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
-                fname = hint if (isinstance(hint, str) and "." in hint) else f"file{index}.{ext}"
-                out = {"type": mtype, "media": "", "_bytes": bytes(data), "_filename": fname, "_content_type": ct}
-                if caption:
-                    out["caption"] = caption
-                    out["parse_mode"] = self.parse_mode
-                return out
-            item = data
-
-        if isinstance(item, (bytes, bytearray)):
-            mtype = _typeFromBytes(bytes(item))
-            ct, ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
-            out = {"type": mtype, "media": "", "_bytes": bytes(item), "_filename": f"file{index}.{ext}", "_content_type": ct}
-            if caption:
-                out["caption"] = caption
-                out["parse_mode"] = self.parse_mode
-            return out
-
-        s = str(item)
-        if "/" in s or "\\" in s or s.startswith("."):
-            if os.path.isfile(s):
-                try:
-                    with open(s, "rb") as f:
-                        data = f.read()
-                    fname = os.path.basename(s)
-                    mtype = _typeFromPath(fname)
-                    ct, ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
-                    out = {"type": mtype, "media": "", "_bytes": data, "_filename": fname, "_content_type": ct}
-                    if caption:
-                        out["caption"] = caption
-                        out["parse_mode"] = self.parse_mode
-                    return out
-                except Exception as e:
-                    _log.warning("media", file=s, err=e)
-
-        mtype = _typeFromPath(s) if "." in s.split("/")[-1] else "photo"
-        out = {"type": mtype, "media": s}
-        if caption:
-            out["caption"] = caption
-            out["parse_mode"] = self.parse_mode
-        return out
+        fields = {"caption": caption, "parse_mode": self.parse_mode if caption else None}
+        return _resolveInputMedia(item, index=index, extensionlessOnly=True, **fields)
 
     def media(self, target, items, caption: str = None, inline=None, keyboard=None, **kwargs):
         cid = chatId(target)
@@ -3051,8 +3089,8 @@ class Gramly:
         mtype = m.get("type", "photo")
         cap = m.get("caption")
         _METHODS = {
-            "video":    ("sendVideo",    "video"),
-            "audio":    ("sendAudio",    "audio"),
+            "video": ("sendVideo", "video"),
+            "audio": ("sendAudio", "audio"),
             "document": ("sendDocument", "document"),
         }
         method, key = _METHODS.get(mtype, ("sendPhoto", "photo"))
@@ -3163,13 +3201,16 @@ class Gramly:
         markup = self._resolveMarkup(inline, keyboard)
         return self._api_call("sendLivePhoto", chat_id=chatId(target), photo=photo, animation=animation, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
-    def messageDraft(self, target, draftId: int, text="", inline=None, keyboard=None, **kwargs):
+    def messageDraft(self, target, draftId: int, text="", inline=None, keyboard=None,
+                      canStop: bool = None, keepOnStop: bool = None, **kwargs):
         if isinstance(text, dict):
             markup = self._resolveMarkup(inline, keyboard)
             cleaned, attachments = _collectRichAttachments(text)
             return self._api_callRich("sendRichMessageDraft", "rich_message", cleaned, attachments,
-                chat_id=chatId(target), draft_id=draftId, reply_markup=markup, **kwargs)
-        return self._api_call("sendMessageDraft", chat_id=chatId(target), draft_id=draftId, text=text, **kwargs)
+                chat_id=chatId(target), draft_id=draftId, reply_markup=markup,
+                can_stop=canStop, keep_on_stop=keepOnStop, **kwargs)
+        return self._api_call("sendMessageDraft", chat_id=chatId(target), draft_id=draftId, text=text,
+            can_stop=canStop, keep_on_stop=keepOnStop, **kwargs)
 
     def checklist(self, target, title: str, tasks: list, **kwargs):
         return self._api_call("sendChecklist", chat_id=chatId(target), title=title, tasks=tasks, **kwargs)
@@ -3324,16 +3365,19 @@ class Gramly:
 
     def savePreparedKeyboardButton(self, text: str, requestUser: dict = None, requestChat: dict = None, requestManagedBot: dict = None, webApp: dict = None, loginUrl: dict = None, switchInline: str = None, switchInlineCurrent: str = None, switchInlineChosen: dict = None, copyText: dict = None, pay: bool = None):
         btn = {"text": text}
-        if requestUser: btn["request_users"] = requestUser
-        if requestChat: btn["request_chat"] = requestChat
-        if requestManagedBot: btn["request_managed_bot"] = requestManagedBot
-        if webApp: btn["web_app"] = webApp
-        if loginUrl: btn["login_url"] = loginUrl
-        if switchInline: btn["switch_inline_query"] = switchInline
-        if switchInlineCurrent: btn["switch_inline_query_current_chat"] = switchInlineCurrent
-        if switchInlineChosen: btn["switch_inline_query_chosen_chat"] = switchInlineChosen
-        if copyText: btn["copy_text"] = copyText
-        if pay: btn["pay"] = pay
+        fields = (
+            ("request_users", requestUser),
+            ("request_chat", requestChat),
+            ("request_managed_bot", requestManagedBot),
+            ("web_app", webApp),
+            ("login_url", loginUrl),
+            ("switch_inline_query", switchInline),
+            ("switch_inline_query_current_chat", switchInlineCurrent),
+            ("switch_inline_query_chosen_chat", switchInlineChosen),
+            ("copy_text", copyText),
+            ("pay", pay),
+        )
+        btn.update((key, value) for key, value in fields if value)
         return self._api_call("savePreparedKeyboardButton", button=btn)
 
     def invoice(self, target, title: str, description: str, payload: str, stars: int, photoUrl: str = None, inline=None, protectContent: bool = False, **kwargs):
@@ -3607,6 +3651,11 @@ class Gramly:
         elif "managed_bot" in update:
             raw = wrap(update["managed_bot"])
             for h in self._managedHandlers:
+                self._submit(h, raw)
+
+        elif "stopped_message_generation" in update:
+            raw = wrap(update["stopped_message_generation"])
+            for h in self._generationStoppedHandlers:
                 self._submit(h, raw)
 
         elif "message" in update:
