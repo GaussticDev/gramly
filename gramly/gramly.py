@@ -98,7 +98,7 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers": ["business_connection"],
     "_commandBlocks": ["message", "callback_query"],
 }
-__version__ = "1.3.3"
+__version__ = "1.4.0"
 __bot_api_version__ = "10.3"
 
 
@@ -712,7 +712,7 @@ def _resolveMediaSource(item, index: int = 0) -> dict:
                 data = f.read()
             fname = os.path.basename(s)
             mtype = _typeFromPath(fname)
-            ct, _ext = _MEDIA_META.get(mtype, _MEDIA_META["document"])
+            ct, _ = _MEDIA_META.get(mtype, _MEDIA_META["document"])
             return {"media": "", "_bytes": data, "_filename": fname, "_content_type": ct}
         except Exception as e:
             _log.warning("richMedia", file=s, err=e)
@@ -2031,18 +2031,22 @@ def matchText(
 
 
 class TextRoute:
-    __slots__ = ("fn", "args_min", "args_error", "guard", "exact", "starts", "ends", "contains", "regex")
+    __slots__ = ("fn", "args_min", "args_error", "filters", "exact", "starts", "ends", "contains", "regex")
 
-    def __init__(self, fn, argsMin: int = None, argsError: str = None, guard=None, exact=None, starts=None, ends=None, contains=None, regex=None):
+    def __init__(self, fn, argsMin: int = None, argsError: str = None, filters=None, exact=None, starts=None, ends=None, contains=None, regex=None):
         self.fn = fn
         self.args_min = argsMin
         self.args_error = argsError
-        self.guard = guard
+        self.filters = list(filters or [])
         self.exact = exact
         self.starts = starts
         self.ends = ends
         self.contains = contains
         self.regex = regex
+
+    @property
+    def isPlainExact(self) -> bool:
+        return self.exact is not None and self.starts is None and self.ends is None and self.contains is None and self.regex is None
 
     def match(self, text: str):
         tl = text.lower()
@@ -2083,15 +2087,23 @@ class _RouteResult:
         self.match = match
 
 
+@dataclass
+class CallbackRoute:
+    fn: Callable
+    argsMin: Optional[int]
+    argsError: Optional[str]
+    filters: Optional[list] = None
+
+
 class CommandBlock:
     __slots__ = (
         "_gramly", "_triggersSingle", "_triggersMulti",
-        "_deny", "_withSlash", "_withoutSlash",
-        "_blockGuard", "_blockArgsMin", "_blockArgsError",
-        "_defaultFn", "_textRoutes", "_callbackRoutes", "_registered",
+        "_withSlash", "_withoutSlash",
+        "_blockArgsMin", "_blockArgsError",
+        "_filters", "_defaultFn", "_defaultFilters", "_exactRoutes", "_patternRoutes", "_callbackRoutes", "_registered",
     )
 
-    def __init__(self, gramly, triggers: list, deny: str = None, withSlash: bool = True, withoutSlash: bool = True, guard=None, argsMin: int = None, argsError: str = None):
+    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None):
         self._gramly = gramly
         self._triggersSingle = set()
         self._triggersMulti = set()
@@ -2101,15 +2113,16 @@ class CommandBlock:
                 self._triggersMulti.add(tl)
             else:
                 self._triggersSingle.add(tl)
-        self._deny = deny
         self._withSlash = withSlash
         self._withoutSlash = withoutSlash
-        self._blockGuard = guard
         self._blockArgsMin = argsMin
         self._blockArgsError = argsError
+        self._filters = list(filters or [])
         self._defaultFn = None
-        self._textRoutes = []
-        self._callbackRoutes = {}
+        self._defaultFilters = []
+        self._exactRoutes: dict = {}
+        self._patternRoutes: list = []
+        self._callbackRoutes: dict = {}
         self._registered = False
 
     def _extractCommand(self, raw: dict):
@@ -2123,24 +2136,63 @@ class CommandBlock:
         tl = t.lower()
         return t, parts, fw, hasSlash, tl
 
-    def default(self, fn) -> Callable:
-        self._defaultFn = fn
-        return fn
+    def _resolveTrigger(self, raw: dict):
+        t, parts, fw, hasSlash, tl = self._extractCommand(raw)
+        if t is None:
+            return None
+        if hasSlash and not self._withSlash:
+            return None
+        if not hasSlash and not self._withoutSlash:
+            return None
 
-    def on(self, *keys, exact=None, starts=None, ends=None, contains=None, regex=None, args: int = None, error: str = None, guard=None) -> Callable:
+        if fw.lstrip("/").split("@")[0].lower() in self._triggersSingle:
+            return t, parts[1:]
+
+        if self._triggersMulti:
+            clean_tl = tl.lstrip("/")
+            clean_t = t.lstrip("/")
+            for mt in self._triggersMulti:
+                if clean_tl == mt or clean_tl.startswith(mt + " "):
+                    remainder = clean_t[len(mt):].strip()
+                    return t, (remainder.split() if remainder else [])
+
+        return None
+
+    def default(self, fn=None, *, filters=None) -> Callable:
+        def decorator(handler):
+            self._defaultFn = handler
+            self._defaultFilters = list(filters or [])
+            return handler
+        return decorator(fn) if fn is not None else decorator
+
+    def on(self, *keys, exact=None, starts=None, ends=None, contains=None, regex=None, args: int = None, error: str = None, filters=None) -> Callable:
         def decorator(fn):
+            routeFilters = list(filters or [])
             if keys:
                 for k in keys:
-                    self._textRoutes.append((k.lower(), TextRoute(fn, args, error, guard, exact=k)))
+                    self._addRoute(k.lower(), TextRoute(fn, args, error, filters=routeFilters, exact=k))
             else:
-                self._textRoutes.append((None, TextRoute(fn, args, error, guard, exact=exact, starts=starts, ends=ends, contains=contains, regex=regex)))
+                route = TextRoute(fn, args, error, filters=routeFilters, exact=exact, starts=starts, ends=ends, contains=contains, regex=regex)
+                self._addRoute(exact.lower() if route.isPlainExact else None, route)
             return fn
         return decorator
 
-    def onCallback(self, *actions, owner: bool = True, guard=None, args: int = None, error: str = None) -> Callable:
+    def _addRoute(self, exactKey: Optional[str], route: TextRoute) -> None:
+        if exactKey is not None:
+            if exactKey in self._exactRoutes:
+                raise ValueError(f"CommandBlock.on: duplicate exact key {exactKey!r} already registered")
+            self._exactRoutes[exactKey] = route
+        else:
+            self._patternRoutes.append(route)
+
+    def onCallback(self, *actions, args: int = None, error: str = None, filters=None) -> Callable:
         def decorator(fn):
+            routeFilters = list(filters or [])
             for a in actions:
-                self._callbackRoutes[a.lower()] = (fn, owner, guard, args, error)
+                key = a.lower()
+                if key in self._callbackRoutes:
+                    raise ValueError(f"CommandBlock.onCallback: duplicate action {key!r} already registered")
+                self._callbackRoutes[key] = CallbackRoute(fn, args, error, routeFilters)
             return fn
         return decorator
 
@@ -2151,59 +2203,60 @@ class CommandBlock:
         self._gramly._registerCommandBlock(self)
 
     def _matchTrigger(self, raw: dict) -> bool:
-        t, parts, fw, hasSlash, tl = self._extractCommand(raw)
-        if t is None:
-            return False
-        if hasSlash and not self._withSlash:
-            return False
-        if not hasSlash and not self._withoutSlash:
-            return False
-        if fw.lstrip("/").split("@")[0].lower() in self._triggersSingle:
-            return True
-        if self._triggersMulti:
-            clean_tl = tl.lstrip("/")
-            for mt in self._triggersMulti:
-                if clean_tl == mt or clean_tl.startswith(mt + " "):
-                    return True
-        return False
+        return self._resolveTrigger(raw) is not None
 
-    def _findRoute(self, subtext: str):
-        for _, route in self._textRoutes:
+    async def _runFilterList(self, filters, ctx):
+        for filter_fn in filters or []:
+            try:
+                ok = filter_fn(ctx)
+                if asyncio.iscoroutine(ok):
+                    ok = await ok
+                if not ok:
+                    return False
+            except Exception:
+                _log.error("filter", fn=getattr(filter_fn, "__name__", repr(filter_fn)), exc_info=True)
+                return False
+        return True
+
+    def _findRoute(self, subtext: str) -> Optional[_RouteResult]:
+        firstWord = subtext.split(" ", 1)[0].lower() if subtext else ""
+        exactRoute = self._exactRoutes.get(firstWord) or self._exactRoutes.get(subtext.lower())
+        if exactRoute is not None:
+            args, match = exactRoute.match(subtext)
+            if args is not None:
+                return _RouteResult(exactRoute, args, match)
+
+        for route in self._patternRoutes:
             args, match = route.match(subtext)
             if args is not None:
                 return _RouteResult(route, args, match)
         return None
+
+    def _submitDefault(self, msg: Message, routeFilters=None):
+        filters = self._filters + self._defaultFilters + list(routeFilters or [])
+        if not filters:
+            self._gramly._submit(self._defaultFn, msg)
+            return
+
+        async def _run_checked():
+            if await self._runFilterList(filters, msg):
+                self._gramly._submit(self._defaultFn, msg)
+
+        self._gramly._submit(_run_checked)
 
     def dispatchMessage(self, raw: dict):
         g = self._gramly
         uid = (raw.get("from") or {}).get("id")
         if uid and not g._checkCooldown(uid, "msg"):
             return
-        if not g._runGuards(raw):
+        resolved = self._resolveTrigger(raw)
+        if resolved is None:
             return
-        if self._blockGuard and not self._blockGuard(Message(raw, [])):
-            return
-
-        t, parts, fw, hasSlash, tl = self._extractCommand(raw)
-        if t is None:
-            return
-
-        matchedTrigger = None
-        clean_tl = tl.lstrip("/")
-        for mt in self._triggersMulti:
-            if clean_tl == mt or clean_tl.startswith(mt + " "):
-                matchedTrigger = mt
-                break
-
-        if matchedTrigger is not None:
-            remainder = t[len(matchedTrigger):].strip()
-            cmdArgs = remainder.split() if remainder else []
-        else:
-            cmdArgs = parts[1:]
+        _, cmdArgs = resolved
 
         if self._blockArgsMin is not None and len(cmdArgs) < self._blockArgsMin:
             if self._blockArgsError:
-                g.send(raw["chat"]["id"], self._blockArgsError)
+                g.send(chatId(raw), self._blockArgsError)
             return
 
         g._runInterceptors(raw)
@@ -2211,53 +2264,59 @@ class CommandBlock:
 
         if not cmdArgs:
             if self._defaultFn:
-                g._submit(self._defaultFn, Message(raw, []))
+                self._submitDefault(Message(raw, []))
             return
 
         subtext = " ".join(cmdArgs)
         result = self._findRoute(subtext)
         if result is None:
             if self._defaultFn:
-                g._submit(self._defaultFn, Message(raw, cmdArgs))
+                self._submitDefault(Message(raw, cmdArgs))
             return
 
         msg = Message(raw, result.args, match=result.match)
         if result.route.args_min is not None and len(result.args) < result.route.args_min:
             if result.route.args_error:
-                g.send(raw["chat"]["id"], result.route.args_error)
+                g.send(chatId(raw), result.route.args_error)
             return
-        if result.route.guard and not result.route.guard(msg):
+        async def _run_checked():
+            if not await self._runFilterList(self._filters, msg):
+                return
+            if not await self._runFilterList(result.route.filters, msg):
+                return
+            g._submit(result.route.fn, msg)
+
+        if self._filters or result.route.filters:
+            g._submit(_run_checked)
             return
+
         g._submit(result.route.fn, msg)
 
     def dispatchCallback(self, raw: dict):
         g = self._gramly
         uid = (raw.get("from") or {}).get("id", 0)
         data = raw.get("data") or ""
-        parts = data.split(":")
-        if len(parts) < 2:
+        if not data:
             return
-        action = parts[1].lower()
+        action = CallbackData(data).action.lower()
         route = self._callbackRoutes.get(action)
         if not route:
             return
 
-        def _run():
+        async def _run():
             cb = CallbackData(data)
-            fn, checkOwner, routeGuard, argsRequired, errorMsg = route
-            if checkOwner and cb.owner is not None and uid != cb.owner:
-                g.alert(raw, self._deny, popup=True) if self._deny else g.ack(raw)
-                return
             extra = cb.parts[2:]
             parsed = CallbackQuery(raw, cb, args=extra)
-            if argsRequired is not None and len(extra) < argsRequired:
-                g.alert(parsed, errorMsg, popup=True) if errorMsg else g.ack(parsed)
+            if route.argsMin is not None and len(extra) < route.argsMin:
+                g.alert(parsed, route.argsError, popup=True) if route.argsError else g.ack(parsed)
                 return
-            if routeGuard and not routeGuard(parsed):
+            if not await self._runFilterList(self._filters, parsed):
                 g.ack(parsed)
                 return
-            future = asyncio.run_coroutine_threadsafe(g._runCallback(parsed, fn), g._loop)
-            future.result()
+            if not await self._runFilterList(route.filters, parsed):
+                g.ack(parsed)
+                return
+            await g._runCallback(parsed, route.fn)
 
         g._ensure_loop()
         if g._loop.is_running():
@@ -2518,13 +2577,29 @@ class Gramly:
             return message.get("chat", {}).get("id"), message.get("message_id")
         return message.chat.id, message.message_id
 
-    def _runGuards(self, raw: dict) -> bool:
+    async def _runGuards(self, ctx) -> bool:
         for fn in self._guards:
             try:
-                if not fn(raw):
+                result = fn(ctx)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if not result:
                     return False
             except Exception:
-                _log.error("guard", fn=fn.__name__, exc_info=True)
+                _log.error("guard", fn=getattr(fn, "__name__", repr(fn)), exc_info=True)
+                return False
+        return True
+
+    async def _runFilterList(self, filters, ctx):
+        for filter_fn in filters or []:
+            try:
+                ok = filter_fn(ctx)
+                if asyncio.iscoroutine(ok):
+                    ok = await ok
+                if not ok:
+                    return False
+            except Exception:
+                _log.error("filter", fn=getattr(filter_fn, "__name__", repr(filter_fn)), exc_info=True)
                 return False
         return True
 
@@ -2539,6 +2614,11 @@ class Gramly:
         self._commandBlocks.append(block)
 
     def guard(self, fn):
+        if not callable(fn):
+            raise TypeError(
+                "guard() expects a function that receives a message context; "
+                f"got {type(fn).__name__}. Use bot.guard(func), not bot.guard(func(...))."
+            )
         self._guards.append(fn)
         return self
 
@@ -2550,15 +2630,23 @@ class Gramly:
         self._stopCallbacks.append(fn)
         return self
 
-    def command(self, *triggers, deny: str = None, withSlash: bool = True, withoutSlash: bool = True, guard=None, argsMin: int = None, argsError: str = None):
+    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None):
         def decorator(fn):
-            block = CommandBlock(self, list(triggers), deny=deny, withSlash=withSlash, withoutSlash=withoutSlash, guard=guard, argsMin=argsMin, argsError=argsError)
+            block = CommandBlock(
+                self,
+                list(triggers),
+                withSlash=withSlash,
+                withoutSlash=withoutSlash,
+                argsMin=argsMin,
+                argsError=argsError,
+                filters=filters,
+            )
             fn(block)
             block._register()
             return fn
         return decorator
 
-    def onMessage(self, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, guard=None, business: bool = False):
+    def onMessage(self, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None, business: bool = False):
         if business:
             def decorator(fn):
                 def _handle(msg: BusinessMessage):
@@ -2571,7 +2659,12 @@ class Gramly:
                             return
                         msg.args = args
                         msg.match = match
-                    if guard and not guard(msg):
+                    if filters:
+                        async def _checked(ctx):
+                            if not await self._runFilterList(filters, ctx):
+                                return
+                            self._submit(fn, ctx)
+                        self._submit(_checked, msg)
                         return
                     self._submit(fn, msg)
                 self._bizMsgHandlers.append(_handle)
@@ -2587,17 +2680,20 @@ class Gramly:
                 uid = (raw.get("from") or {}).get("id")
                 if uid and not self._checkCooldown(uid, "msg"):
                     return
-                if not self._runGuards(raw):
-                    return
                 parsed = Message(raw, args, match=match)
-                if guard and not guard(parsed):
-                    return
                 if argsMin is not None and len(args) < argsMin:
                     if argsError:
                         self.send(raw["chat"]["id"], argsError)
                     return
                 self._runInterceptors(raw)
                 self._markHandled(raw.get("message_id"))
+                if filters:
+                    async def _checked(ctx):
+                        if not await self._runFilterList(filters, ctx):
+                            return
+                        self._submit(fn, ctx)
+                    self._submit(_checked, parsed)
+                    return
                 self._submit(fn, parsed)
             self._messageHandlers.append(_handle)
             return fn
@@ -2613,8 +2709,6 @@ class Gramly:
                 uid = (raw.get("from") or {}).get("id")
                 if uid and not self._checkCooldown(uid, "msg"):
                     return
-                if not self._runGuards(raw):
-                    return
                 text = raw.get("text") or ""
                 self._submit(fn, Message(raw, text.split() if text else []))
             self._editedHandlers.append(_handle)
@@ -2624,8 +2718,6 @@ class Gramly:
     def onPost(self):
         def decorator(fn):
             def _handle(raw: dict):
-                if not self._runGuards(raw):
-                    return
                 self._submit(fn, Message(raw, []))
             self._postHandlers.append(_handle)
             return fn
@@ -2640,8 +2732,6 @@ class Gramly:
                         uid = (raw.get("from") or {}).get("id")
                         if uid and not self._checkCooldown(uid, "msg"):
                             return
-                        if not self._runGuards(raw):
-                            return
                         self._runInterceptors(raw)
                         self._submit(fn, Message(raw, []))
                         return
@@ -2654,35 +2744,28 @@ class Gramly:
             def _handle(raw: dict):
                 if self._popHandled(raw.get("message_id")):
                     return
-                if not self._runGuards(raw):
-                    return
                 self._submit(fn, Message(raw, []))
             self._anyHandlers.append(_handle)
             return fn
         return decorator
 
-    def onCallback(self, *prefixes, owner: bool = True, ownerPos: int = None, deny=None, guard=None):
+
+    def onCallback(self, *prefixes, filters=None):
         def decorator(fn):
+            routeFilters = list(filters or [])
             def _handle(raw: dict):
                 data = raw.get("data") or ""
                 if prefixes and not any(data.startswith(p) for p in prefixes):
                     return
                 uid = (raw.get("from") or {}).get("id", 0)
 
-                def _run():
+                async def _run():
                     cb = CallbackData(data)
                     parsed = CallbackQuery(raw, cb)
-                    checkPos = ownerPos if ownerPos is not None else (0 if owner else None)
-                    if checkPos is not None:
-                        oid = cb.get(checkPos, int)
-                        if oid is not None and uid != oid:
-                            deny(parsed) if deny else self.ack(parsed)
-                            return
-                    if guard and not guard(parsed):
+                    if routeFilters and not await self._runFilterList(routeFilters, parsed):
                         self.ack(parsed)
                         return
-                    future = asyncio.run_coroutine_threadsafe(self._runCallback(parsed, fn), self._loop)
-                    future.result()
+                    await self._runCallback(parsed, fn)
 
                 self._ensure_loop()
                 if self._loop.is_running():
@@ -3613,9 +3696,22 @@ class Gramly:
 
     def processUpdate(self, update: dict):
         raw = dict(update) if isinstance(update, Obj) else update
-        self._dispatch(raw)
+        if _in_async_task():
+            return asyncio.create_task(self._dispatch(raw))
+        return self._run_coro(self._dispatch(raw))
 
-    def _dispatch(self, update: dict):
+    async def _dispatch(self, update: dict):
+        for updateType in (
+            "message", "edited_message", "channel_post", "edited_channel_post",
+        ):
+            if updateType in update and not await self._runGuards(Message(update[updateType], [])):
+                return
+
+        if "business_message" in update and not await self._runGuards(BusinessMessage(update["business_message"], self)):
+            return
+        if "edited_business_message" in update and not await self._runGuards(BusinessMessage(update["edited_business_message"], self)):
+            return
+
         if "business_connection" in update:
             conn = BusinessConnection(update["business_connection"])
             with self._bizConnCacheLock:
@@ -3682,11 +3778,12 @@ class Gramly:
         elif "callback_query" in update:
             raw = update["callback_query"]
             data = raw.get("data") or ""
-            parts = data.split(":")
-            for block in self._commandBlocks:
-                if len(parts) >= 2 and parts[1].lower() in block._callbackRoutes:
-                    block.dispatchCallback(raw)
-                    return
+            if data:
+                action = CallbackData(data).action.lower()
+                for block in self._commandBlocks:
+                    if action in block._callbackRoutes:
+                        block.dispatchCallback(raw)
+                        return
             for h in self._callbackHandlers:
                 h(raw)
 
@@ -3810,7 +3907,7 @@ class Gramly:
                     uid = u.update_id if hasattr(u, "update_id") else u.get("update_id", 0)
                     offset = uid + 1
                     raw = _to_raw(u) if isinstance(u, Obj) else u
-                    self._dispatch(raw)
+                    await self._dispatch(raw)
             except TelegramError as e:
                 if "conflict" in str(e).lower():
                     _log.error("polling", reason="conflict", err=e)
