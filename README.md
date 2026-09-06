@@ -1,7 +1,7 @@
 <p align="center">
   <a href="https://pypi.org/project/gramly/"><img alt="PyPI Version" src="https://shieldcn.dev/pypi/gramly.svg?variant=default&size=default&mode=dark&color=2563eb"></a>
   &nbsp;
-  <a href="https://core.telegram.org/bots/api"><img alt="Telegram API" src="https://shieldcn.dev/badge/Telegram_API-v10.1-26a5e4.svg?variant=branded&size=default&mode=dark&logo=telegram&logoColor=white"></a>
+  <a href="https://core.telegram.org/bots/api"><img alt="Telegram API" src="https://shieldcn.dev/badge/Telegram_API-v10.3-26a5e4.svg?variant=branded&size=default&mode=dark&logo=telegram&logoColor=white"></a>
 </p>
 
 <p align="center">
