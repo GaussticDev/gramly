@@ -98,7 +98,7 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers": ["business_connection"],
     "_commandBlocks": ["message", "callback_query"],
 }
-__version__ = "1.4.0"
+__version__ = "1.3.4"
 __bot_api_version__ = "10.3"
 
 
