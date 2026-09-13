@@ -98,7 +98,7 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers": ["business_connection"],
     "_commandBlocks": ["message", "callback_query"],
 }
-__version__ = "1.3.4"
+__version__ = "1.3.5"
 __bot_api_version__ = "10.3"
 
 
@@ -1747,11 +1747,11 @@ class BusinessMessage(ArgsMixin, RawAttrMixin):
         return self._gramly.businessAction(self.chat_id, self.bc_id, action)
 
     def read(self):
-        return self._gramly.businessRead(self.bc_id, self.chat_id, self.message_id)
+        return self._gramly.businessRead(self.chat_id, self.message_id, self.bc_id)
 
     def delete(self, messageIds: list = None):
         ids = messageIds if messageIds is not None else [self.message_id]
-        return self._gramly.businessDelete(self.bc_id, self.chat_id, ids)
+        return self._gramly.delete(self.chat_id, ids, bcId=self.bc_id)
 
     def pin(self, notify: bool = False):
         return self._gramly.pin(self, notify=notify)
@@ -2097,13 +2097,13 @@ class CallbackRoute:
 
 class CommandBlock:
     __slots__ = (
-        "_gramly", "_triggersSingle", "_triggersMulti",
+        "_gramly", "_triggersSingle", "_triggersMulti", "_triggerPrefixes", "_triggerSuffixes",
         "_withSlash", "_withoutSlash",
         "_blockArgsMin", "_blockArgsError",
         "_filters", "_defaultFn", "_defaultFilters", "_exactRoutes", "_patternRoutes", "_callbackRoutes", "_registered",
     )
 
-    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None):
+    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None, starts=None, ends=None):
         self._gramly = gramly
         self._triggersSingle = set()
         self._triggersMulti = set()
@@ -2113,6 +2113,16 @@ class CommandBlock:
                 self._triggersMulti.add(tl)
             else:
                 self._triggersSingle.add(tl)
+        self._triggerPrefixes = [p.lower() for p in toList(starts)]
+        self._triggerSuffixes = [e.lower() for e in toList(ends)]
+        if not (self._triggersSingle or self._triggersMulti or self._triggerPrefixes or self._triggerSuffixes):
+            raise ValueError("CommandBlock: provide at least one of triggers, starts=, or ends=")
+        if (self._triggerPrefixes or self._triggerSuffixes) and (argsMin is not None or argsError is not None):
+            raise ValueError(
+                "CommandBlock: argsMin/argsError count args from the block trigger, which is ambiguous "
+                "for starts=/ends= blocks (the matched sub-command name would count as an arg). "
+                "Use block.on(name, args=N, error=...) instead."
+            )
         self._withSlash = withSlash
         self._withoutSlash = withoutSlash
         self._blockArgsMin = argsMin
@@ -2155,6 +2165,16 @@ class CommandBlock:
                 if clean_tl == mt or clean_tl.startswith(mt + " "):
                     remainder = clean_t[len(mt):].strip()
                     return t, (remainder.split() if remainder else [])
+
+        for p in self._triggerPrefixes:
+            if tl.startswith(p):
+                remainder = t[len(p):].strip()
+                return t, (remainder.split() if remainder else [])
+
+        for s in self._triggerSuffixes:
+            if tl.endswith(s):
+                remainder = t[:-len(s)].strip()
+                return t, (remainder.split() if remainder else [])
 
         return None
 
@@ -2630,7 +2650,7 @@ class Gramly:
         self._stopCallbacks.append(fn)
         return self
 
-    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None):
+    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None, starts=None, ends=None):
         def decorator(fn):
             block = CommandBlock(
                 self,
@@ -2640,6 +2660,8 @@ class Gramly:
                 argsMin=argsMin,
                 argsError=argsError,
                 filters=filters,
+                starts=starts,
+                ends=ends,
             )
             fn(block)
             block._register()
@@ -2884,11 +2906,11 @@ class Gramly:
     def businessAction(self, target, bcId: str, action: str = "typing"):
         return self._safe("sendChatAction", chat_id=chatId(target), action=action, business_connection_id=bcId)
 
-    def businessRead(self, bcId: str, chatIdVal: int, maxMessageId: int):
-        return self._safe("readBusinessMessage", business_connection_id=bcId, chat_id=chatIdVal, message_id=maxMessageId)
+    def businessRead(self, target, maxMessageId: int, bcId: str):
+        return self._safe("readBusinessMessage", business_connection_id=bcId, chat_id=chatId(target), message_id=maxMessageId)
 
-    def businessDelete(self, bcId: str, chatIdVal: int, messageIds: list):
-        return self._safe("deleteBusinessMessages", business_connection_id=bcId, chat_id=chatIdVal, message_ids=messageIds)
+    def businessDelete(self, target, messageIds: list, bcId: str):
+        return self.delete(target, messageIds, bcId=bcId)
 
     def timer(self, seconds: float, fn, fireNow: bool = False) -> TimerHandle:
         handle = TimerHandle()
@@ -2927,15 +2949,15 @@ class Gramly:
 
     def reply(self, message, text, keyboard=None, inline=None, photo=None, forceReply: bool = None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
-        chatIdVal, msgId = self._msgFrom(message)
+        cid, msgId = self._msgFrom(message)
         if isinstance(text, dict):
             built = text
             cleaned, attachments = _collectRichAttachments(built)
             return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
-                chat_id=chatIdVal, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
+                chat_id=cid, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
         if photo is not None:
-            return self._api_call("sendPhoto", chat_id=chatIdVal, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
-        return self._api_call("sendMessage", chat_id=chatIdVal, text=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
+            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
+        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
 
     def ephemeral(self, target, text, to=None, keyboard=None, inline=None, photo=None,
                   replaceCallbackMessage: bool = None, **kwargs):
@@ -2959,71 +2981,71 @@ class Gramly:
             reply_markup=markup, ephemeral_message_parameters=ephParams, reply_parameters=replyParams, **kwargs)
 
     def edit(self, call, text, inline=None, photo=None, showCaption: bool = None, **kwargs):
-        chatIdVal, msgId, hasPhoto, bcId, ephId = self._msgTarget(call)
+        cid, msgId, hasPhoto, bcId, ephId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if ephId is not None:
-            self._debug("edit", chat=chatIdVal, ephemeral=ephId)
+            self._debug("edit", chat=cid, ephemeral=ephId)
             if photo is not None:
                 media = _resolveInputMedia(photo, "photo", caption=text, parse_mode=self.parse_mode,
                                             show_caption_above_media=showCaption)
                 cleanedMedia, attachments = _collectRichAttachments(media)
                 return self._api_callRich("editEphemeralMessageMedia", "media", cleanedMedia, attachments,
-                    chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
+                    chat_id=cid, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
             if hasPhoto:
-                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, show_caption_above_media=showCaption, reply_markup=markup, **kwargs)
+                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=cid, ephemeral_message_id=ephId, parse_mode=self.parse_mode, show_caption_above_media=showCaption, reply_markup=markup, **kwargs)
             if isinstance(text, dict):
                 cleaned, attachments = _collectRichAttachments(text)
                 if attachments:
                     raise ValueError("edit: rich message references local files; use a file_id or URL when editing an ephemeral message")
-                return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_rich", rich_message=cleaned, chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
-            return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_text", text=text, chat_id=chatIdVal, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+                return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_rich", rich_message=cleaned, chat_id=cid, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
+            return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_text", text=text, chat_id=cid, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
         if isinstance(text, dict):
             built = text
             cleaned, attachments = _collectRichAttachments(built)
             if attachments:
                 raise ValueError("edit: rich message references local files; use a file_id or URL when editing")
-            self._debug("edit", chat=chatIdVal, msg=msgId, bc=bcId, rich=True)
+            self._debug("edit", chat=cid, msg=msgId, bc=bcId, rich=True)
             return self._editSafe("edit", "editMessageText", kind="rich",
-                rich_message=cleaned, chat_id=chatIdVal, message_id=msgId,
+                rich_message=cleaned, chat_id=cid, message_id=msgId,
                 business_connection_id=bcId, reply_markup=markup, **kwargs)
-        self._debug("edit", chat=chatIdVal, msg=msgId, bc=bcId)
+        self._debug("edit", chat=cid, msg=msgId, bc=bcId)
         if photo is not None:
             media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
-            return self._editSafe("edit", "editMessageMedia", kind="media", media=media, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
+            return self._editSafe("edit", "editMessageMedia", kind="media", media=media, chat_id=cid, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
         if hasPhoto:
-            return self._editSafe("edit", "editMessageCaption", kind="caption", caption=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._editSafe("edit", "editMessageText", kind="text", text=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._editSafe("edit", "editMessageCaption", kind="caption", caption=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._editSafe("edit", "editMessageText", kind="text", text=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
     def editMarkup(self, call, inline=None):
-        chatIdVal, msgId, _, bcId, ephId = self._msgTarget(call)
+        cid, msgId, _, bcId, ephId = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if ephId is not None:
-            return self._editSafe("editMarkup", "editEphemeralMessageReplyMarkup", kind="ephemeral", chat_id=chatIdVal, ephemeral_message_id=ephId, reply_markup=markup)
-        return self._editSafe("editMarkup", "editMessageReplyMarkup", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
+            return self._editSafe("editMarkup", "editEphemeralMessageReplyMarkup", kind="ephemeral", chat_id=cid, ephemeral_message_id=ephId, reply_markup=markup)
+        return self._editSafe("editMarkup", "editMessageReplyMarkup", chat_id=cid, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
 
     def replace(self, call, text: str, inline=None, photo=None, **kwargs):
-        chatIdVal, msgId, hasPhoto, bcId, _ = self._msgTarget(call)
+        cid, msgId, hasPhoto, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if photo is not None:
             media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
-            return self._editSafe("replace", "editMessageMedia", kind="swap_photo", media=media, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
+            return self._editSafe("replace", "editMessageMedia", kind="swap_photo", media=media, chat_id=cid, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
         if hasPhoto:
             try:
-                self._api_call("deleteMessage", chat_id=chatIdVal, message_id=msgId)
+                self._api_call("deleteMessage", chat_id=cid, message_id=msgId)
             except Exception:
                 pass
-            return self._api_call("sendMessage", chat_id=chatIdVal, text=text, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._editSafe("replace", "editMessageText", text=text, chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._api_call("sendMessage", chat_id=cid, text=text, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._editSafe("replace", "editMessageText", text=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
 
     def editLiveLocation(self, call, latitude: float, longitude: float, inline=None, **kwargs):
-        chatIdVal, msgId, _, bcId, _ = self._msgTarget(call)
+        cid, msgId, _, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
-        return self._api_call("editMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, latitude=latitude, longitude=longitude, reply_markup=markup, **kwargs)
+        return self._api_call("editMessageLiveLocation", chat_id=cid, message_id=msgId, business_connection_id=bcId, latitude=latitude, longitude=longitude, reply_markup=markup, **kwargs)
 
     def stopLiveLocation(self, call, inline=None, **kwargs):
-        chatIdVal, msgId, _, bcId, _ = self._msgTarget(call)
+        cid, msgId, _, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
-        return self._api_call("stopMessageLiveLocation", chat_id=chatIdVal, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
+        return self._api_call("stopMessageLiveLocation", chat_id=cid, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
 
     def alert(self, call, text: str = "", popup: bool = False):
         if isinstance(call, CallbackQuery):
@@ -3043,19 +3065,36 @@ class Gramly:
     def ack(self, call):
         self.alert(call, text="", popup=False)
 
-    def delete(self, message) -> bool:
+    def delete(self, target, messageId=None, bcId: str = None) -> bool:
+        """Всё удаление в одном методе: delete(msg) | delete(chat, id) |
+        delete(chat, [ids]) | delete(..., bcId=...) для бизнес-чатов."""
         try:
-            chatIdVal, msgId, _, _, ephId = self._msgTarget(message)
-            if ephId is not None:
-                self._api_call("deleteEphemeralMessage", chat_id=chatIdVal, ephemeral_message_id=ephId)
-            else:
-                self._api_call("deleteMessage", chat_id=chatIdVal, message_id=msgId)
-            return True
+            if messageId is None:
+                cid, msgId, _, bc, ephId = self._msgTarget(target)
+                if ephId is not None:
+                    self._api_call("deleteEphemeralMessage", chat_id=cid, ephemeral_message_id=ephId)
+                    return True
+                bc = bcId if bcId is not None else bc
+                if bc is not None:
+                    return bool(self._safe("deleteBusinessMessages", business_connection_id=bc, chat_id=cid, message_ids=[msgId]))
+                self._api_call("deleteMessage", chat_id=cid, message_id=msgId)
+                return True
+            ids = list(messageId) if isinstance(messageId, (list, tuple, set)) else [messageId]
+            cid = chatId(target)
+            if bcId is not None:
+                return bool(self._safe("deleteBusinessMessages", business_connection_id=bcId, chat_id=cid, message_ids=ids))
+            if len(ids) == 1:
+                self._api_call("deleteMessage", chat_id=cid, message_id=ids[0])
+                return True
+            return bool(self._safe("deleteMessages", chat_id=cid, message_ids=ids))
         except Exception:
             return False
 
-    def deleteLater(self, message, delay: float):
-        timer = threading.Timer(delay, self.delete, args=[message])
+    def deleteMessage(self, target, messageId: int, bcId: str = None) -> bool:
+        return self.delete(target, messageId, bcId=bcId)
+
+    def deleteLater(self, message, delay: float, messageId=None, bcId: str = None):
+        timer = threading.Timer(delay, self.delete, args=[message, messageId], kwargs={"bcId": bcId})
         timer.daemon = True
         self._pendingTimers.append(timer)
         timer.start()
@@ -3080,8 +3119,8 @@ class Gramly:
 
     def pin(self, message, notify: bool = False):
         try:
-            chatIdVal, msgId, _, bcId, _ = self._msgTarget(message)
-            self._api_call("pinChatMessage", chat_id=chatIdVal, message_id=msgId, disable_notification=not notify, business_connection_id=bcId)
+            cid, msgId, _, bcId, _ = self._msgTarget(message)
+            self._api_call("pinChatMessage", chat_id=cid, message_id=msgId, disable_notification=not notify, business_connection_id=bcId)
         except Exception as e:
             _log.warning("pin", err=e)
 
@@ -3264,11 +3303,11 @@ class Gramly:
     def businessPoll(self, target, question: str, options: list, bcId: str, **kwargs):
         return self.poll(target, question, options, business_connection_id=bcId, **kwargs)
 
-    def stopPoll(self, chatIdVal: int, messageId: int, **kwargs):
-        return self._api_call("stopPoll", chat_id=chatIdVal, message_id=messageId, **kwargs)
+    def stopPoll(self, target, messageId: int, **kwargs):
+        return self._api_call("stopPoll", chat_id=chatId(target), message_id=messageId, **kwargs)
 
-    def businessStopPoll(self, chatIdVal: int, messageId: int, bcId: str, **kwargs):
-        return self.stopPoll(chatIdVal, messageId, business_connection_id=bcId, **kwargs)
+    def businessStopPoll(self, target, messageId: int, bcId: str, **kwargs):
+        return self.stopPoll(target, messageId, business_connection_id=bcId, **kwargs)
 
     def dice(self, target, emoji: str = "\U0001f3b2", **kwargs):
         return self._api_call("sendDice", chat_id=chatId(target), emoji=emoji, **kwargs)
@@ -3298,137 +3337,137 @@ class Gramly:
     def checklist(self, target, title: str, tasks: list, **kwargs):
         return self._api_call("sendChecklist", chat_id=chatId(target), title=title, tasks=tasks, **kwargs)
 
-    def editChecklist(self, chatIdVal: int, messageId: int, title: str, tasks: list, **kwargs):
-        return self._api_call("editMessageChecklist", chat_id=chatIdVal, message_id=messageId, title=title, tasks=tasks, **kwargs)
+    def editChecklist(self, target, messageId: int, title: str, tasks: list, **kwargs):
+        return self._api_call("editMessageChecklist", chat_id=chatId(target), message_id=messageId, title=title, tasks=tasks, **kwargs)
 
-    def ban(self, chatIdVal: int, userId: int, until: int = 0, revokeMessages: bool = False):
-        return self._safe("banChatMember", chat_id=chatIdVal, user_id=userId, until_date=until, revoke_messages=revokeMessages)
+    def ban(self, target, userId: int, until: int = 0, revokeMessages: bool = False):
+        return self._safe("banChatMember", chat_id=chatId(target), user_id=userId, until_date=until, revoke_messages=revokeMessages)
 
-    def unban(self, chatIdVal: int, userId: int):
-        return self._safe("unbanChatMember", chat_id=chatIdVal, user_id=userId, only_if_banned=True)
+    def unban(self, target, userId: int):
+        return self._safe("unbanChatMember", chat_id=chatId(target), user_id=userId, only_if_banned=True)
 
-    def kick(self, chatIdVal: int, userId: int):
-        self.ban(chatIdVal, userId)
-        self.unban(chatIdVal, userId)
+    def kick(self, target, userId: int):
+        self.ban(target, userId)
+        self.unban(target, userId)
 
-    def mute(self, chatIdVal: int, userId: int, until: int = 0):
-        return self._safe("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions={"can_send_messages": False}, until_date=until)
+    def mute(self, target, userId: int, until: int = 0):
+        return self._safe("restrictChatMember", chat_id=chatId(target), user_id=userId, permissions={"can_send_messages": False}, until_date=until)
 
-    def unmute(self, chatIdVal: int, userId: int):
-        return self._safe("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions=dict(DEFAULT_PERMISSIONS))
+    def unmute(self, target, userId: int):
+        return self._safe("restrictChatMember", chat_id=chatId(target), user_id=userId, permissions=dict(DEFAULT_PERMISSIONS))
 
-    def restrict(self, chatIdVal: int, userId: int, permissions: dict, until: int = 0):
-        return self._safe("restrictChatMember", chat_id=chatIdVal, user_id=userId, permissions=permissions, until_date=until)
+    def restrict(self, target, userId: int, permissions: dict, until: int = 0):
+        return self._safe("restrictChatMember", chat_id=chatId(target), user_id=userId, permissions=permissions, until_date=until)
 
-    def promote(self, chatIdVal: int, userId: int, **permissions):
-        return self._safe("promoteChatMember", chat_id=chatIdVal, user_id=userId, **permissions)
+    def promote(self, target, userId: int, **permissions):
+        return self._safe("promoteChatMember", chat_id=chatId(target), user_id=userId, **permissions)
 
-    def setAdminTitle(self, chatIdVal: int, userId: int, title: str):
-        return self._safe("setChatAdministratorCustomTitle", chat_id=chatIdVal, user_id=userId, custom_title=title)
+    def setAdminTitle(self, target, userId: int, title: str):
+        return self._safe("setChatAdministratorCustomTitle", chat_id=chatId(target), user_id=userId, custom_title=title)
 
-    def setMemberTag(self, chatIdVal: int, userId: int, tag: str):
-        return self._safe("setChatMemberTag", chat_id=chatIdVal, user_id=userId, tag=tag)
+    def setMemberTag(self, target, userId: int, tag: str):
+        return self._safe("setChatMemberTag", chat_id=chatId(target), user_id=userId, tag=tag)
 
-    def setChatPermissions(self, chatIdVal: int, permissions: dict):
-        return self._safe("setChatPermissions", chat_id=chatIdVal, permissions=permissions)
+    def setChatPermissions(self, target, permissions: dict):
+        return self._safe("setChatPermissions", chat_id=chatId(target), permissions=permissions)
 
-    def approveJoin(self, chatOrRq, userId: int = None):
-        if isinstance(chatOrRq, JoinRequest):
-            chatIdVal, uid = chatOrRq.chat_id, chatOrRq.user_id
+    def approveJoin(self, target, userId: int = None):
+        if isinstance(target, JoinRequest):
+            cid, uid = target.chat_id, target.user_id
         else:
-            chatIdVal, uid = chatOrRq, userId
-        return self._safe("approveChatJoinRequest", chat_id=chatIdVal, user_id=uid)
+            cid, uid = chatId(target), userId
+        return self._safe("approveChatJoinRequest", chat_id=cid, user_id=uid)
 
-    def declineJoin(self, chatOrRq, userId: int = None):
-        if isinstance(chatOrRq, JoinRequest):
-            chatIdVal, uid = chatOrRq.chat_id, chatOrRq.user_id
+    def declineJoin(self, target, userId: int = None):
+        if isinstance(target, JoinRequest):
+            cid, uid = target.chat_id, target.user_id
         else:
-            chatIdVal, uid = chatOrRq, userId
-        return self._safe("declineChatJoinRequest", chat_id=chatIdVal, user_id=uid)
+            cid, uid = chatId(target), userId
+        return self._safe("declineChatJoinRequest", chat_id=cid, user_id=uid)
 
-    def answerJoinRequestQuery(self, chatIdVal: int, userId: int, queryId: str, result: dict):
-        return self._safe("answerChatJoinRequestQuery", chat_id=chatIdVal, user_id=userId, query_id=queryId, result=result)
+    def answerJoinRequestQuery(self, target, userId: int, queryId: str, result: dict):
+        return self._safe("answerChatJoinRequestQuery", chat_id=chatId(target), user_id=userId, query_id=queryId, result=result)
 
-    def sendJoinRequestWebApp(self, chatIdVal: int, userId: int, webAppUrl: str, **kwargs):
-        return self._api_call("sendChatJoinRequestWebApp", chat_id=chatIdVal, user_id=userId, web_app_url=webAppUrl, **kwargs)
+    def sendJoinRequestWebApp(self, target, userId: int, webAppUrl: str, **kwargs):
+        return self._api_call("sendChatJoinRequestWebApp", chat_id=chatId(target), user_id=userId, web_app_url=webAppUrl, **kwargs)
 
-    def deleteMessages(self, chatIdVal: int, messageIds: list):
-        return self._safe("deleteMessages", chat_id=chatIdVal, message_ids=messageIds)
+    def deleteMessages(self, target, messageIds: list, bcId: str = None) -> bool:
+        return self.delete(target, messageIds, bcId=bcId)
 
-    def leave(self, chatIdVal: int):
-        return self._safe("leaveChat", chat_id=chatIdVal)
+    def leave(self, target):
+        return self._safe("leaveChat", chat_id=chatId(target))
 
-    def setChatTitle(self, chatIdVal: int, title: str):
-        return self._safe("setChatTitle", chat_id=chatIdVal, title=title)
+    def setChatTitle(self, target, title: str):
+        return self._safe("setChatTitle", chat_id=chatId(target), title=title)
 
-    def setChatDescription(self, chatIdVal: int, description: str):
-        return self._safe("setChatDescription", chat_id=chatIdVal, description=description)
+    def setChatDescription(self, target, description: str):
+        return self._safe("setChatDescription", chat_id=chatId(target), description=description)
 
-    def setChatPhoto(self, chatIdVal: int, photo):
-        return self._safe("setChatPhoto", chat_id=chatIdVal, photo=photo)
+    def setChatPhoto(self, target, photo):
+        return self._safe("setChatPhoto", chat_id=chatId(target), photo=photo)
 
-    def deleteChatPhoto(self, chatIdVal: int):
-        return self._safe("deleteChatPhoto", chat_id=chatIdVal)
+    def deleteChatPhoto(self, target):
+        return self._safe("deleteChatPhoto", chat_id=chatId(target))
 
-    def banSender(self, chatIdVal: int, senderChatId: int):
-        return self._safe("banChatSenderChat", chat_id=chatIdVal, sender_chat_id=senderChatId)
+    def banSender(self, target, senderChatId: int):
+        return self._safe("banChatSenderChat", chat_id=chatId(target), sender_chat_id=senderChatId)
 
-    def unbanSender(self, chatIdVal: int, senderChatId: int):
-        return self._safe("unbanChatSenderChat", chat_id=chatIdVal, sender_chat_id=senderChatId)
+    def unbanSender(self, target, senderChatId: int):
+        return self._safe("unbanChatSenderChat", chat_id=chatId(target), sender_chat_id=senderChatId)
 
-    def exportInvite(self, chatIdVal: int) -> str:
-        return self._api_call("exportChatInviteLink", chat_id=chatIdVal)
+    def exportInvite(self, target) -> str:
+        return self._api_call("exportChatInviteLink", chat_id=chatId(target))
 
-    def createInvite(self, chatIdVal: int, **kwargs):
-        return self._api_call("createChatInviteLink", chat_id=chatIdVal, **kwargs)
+    def createInvite(self, target, **kwargs):
+        return self._api_call("createChatInviteLink", chat_id=chatId(target), **kwargs)
 
-    def editInvite(self, chatIdVal: int, inviteLink: str, **kwargs):
-        return self._api_call("editChatInviteLink", chat_id=chatIdVal, invite_link=inviteLink, **kwargs)
+    def editInvite(self, target, inviteLink: str, **kwargs):
+        return self._api_call("editChatInviteLink", chat_id=chatId(target), invite_link=inviteLink, **kwargs)
 
-    def revokeInvite(self, chatIdVal: int, inviteLink: str):
-        return self._api_call("revokeChatInviteLink", chat_id=chatIdVal, invite_link=inviteLink)
+    def revokeInvite(self, target, inviteLink: str):
+        return self._api_call("revokeChatInviteLink", chat_id=chatId(target), invite_link=inviteLink)
 
-    def createSubscriptionInvite(self, chatIdVal: int, subscriptionPeriod: int, subscriptionPrice: int, **kwargs):
-        return self._api_call("createChatSubscriptionInviteLink", chat_id=chatIdVal, subscription_period=subscriptionPeriod, subscription_price=subscriptionPrice, **kwargs)
+    def createSubscriptionInvite(self, target, subscriptionPeriod: int, subscriptionPrice: int, **kwargs):
+        return self._api_call("createChatSubscriptionInviteLink", chat_id=chatId(target), subscription_period=subscriptionPeriod, subscription_price=subscriptionPrice, **kwargs)
 
-    def editSubscriptionInvite(self, chatIdVal: int, inviteLink: str, **kwargs):
-        return self._api_call("editChatSubscriptionInviteLink", chat_id=chatIdVal, invite_link=inviteLink, **kwargs)
+    def editSubscriptionInvite(self, target, inviteLink: str, **kwargs):
+        return self._api_call("editChatSubscriptionInviteLink", chat_id=chatId(target), invite_link=inviteLink, **kwargs)
 
-    def createTopic(self, chatIdVal: int, name: str, **kwargs):
-        return self._api_call("createForumTopic", chat_id=chatIdVal, name=name, **kwargs)
+    def createTopic(self, target, name: str, **kwargs):
+        return self._api_call("createForumTopic", chat_id=chatId(target), name=name, **kwargs)
 
-    def editTopic(self, chatIdVal: int, messageThreadId: int, **kwargs):
-        return self._api_call("editForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId, **kwargs)
+    def editTopic(self, target, messageThreadId: int, **kwargs):
+        return self._api_call("editForumTopic", chat_id=chatId(target), message_thread_id=messageThreadId, **kwargs)
 
-    def closeTopic(self, chatIdVal: int, messageThreadId: int):
-        return self._safe("closeForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
+    def closeTopic(self, target, messageThreadId: int):
+        return self._safe("closeForumTopic", chat_id=chatId(target), message_thread_id=messageThreadId)
 
-    def reopenTopic(self, chatIdVal: int, messageThreadId: int):
-        return self._safe("reopenForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
+    def reopenTopic(self, target, messageThreadId: int):
+        return self._safe("reopenForumTopic", chat_id=chatId(target), message_thread_id=messageThreadId)
 
-    def deleteTopic(self, chatIdVal: int, messageThreadId: int):
-        return self._safe("deleteForumTopic", chat_id=chatIdVal, message_thread_id=messageThreadId)
+    def deleteTopic(self, target, messageThreadId: int):
+        return self._safe("deleteForumTopic", chat_id=chatId(target), message_thread_id=messageThreadId)
 
-    def unpinTopicMessages(self, chatIdVal: int, messageThreadId: int):
-        return self._safe("unpinAllForumTopicMessages", chat_id=chatIdVal, message_thread_id=messageThreadId)
+    def unpinTopicMessages(self, target, messageThreadId: int):
+        return self._safe("unpinAllForumTopicMessages", chat_id=chatId(target), message_thread_id=messageThreadId)
 
-    def editGeneralTopic(self, chatIdVal: int, name: str):
-        return self._safe("editGeneralForumTopic", chat_id=chatIdVal, name=name)
+    def editGeneralTopic(self, target, name: str):
+        return self._safe("editGeneralForumTopic", chat_id=chatId(target), name=name)
 
-    def closeGeneralTopic(self, chatIdVal: int):
-        return self._safe("closeGeneralForumTopic", chat_id=chatIdVal)
+    def closeGeneralTopic(self, target):
+        return self._safe("closeGeneralForumTopic", chat_id=chatId(target))
 
-    def reopenGeneralTopic(self, chatIdVal: int):
-        return self._safe("reopenGeneralForumTopic", chat_id=chatIdVal)
+    def reopenGeneralTopic(self, target):
+        return self._safe("reopenGeneralForumTopic", chat_id=chatId(target))
 
-    def hideGeneralTopic(self, chatIdVal: int):
-        return self._safe("hideGeneralForumTopic", chat_id=chatIdVal)
+    def hideGeneralTopic(self, target):
+        return self._safe("hideGeneralForumTopic", chat_id=chatId(target))
 
-    def unhideGeneralTopic(self, chatIdVal: int):
-        return self._safe("unhideGeneralForumTopic", chat_id=chatIdVal)
+    def unhideGeneralTopic(self, target):
+        return self._safe("unhideGeneralForumTopic", chat_id=chatId(target))
 
-    def unpinGeneralTopicMessages(self, chatIdVal: int):
-        return self._safe("unpinAllGeneralForumTopicMessages", chat_id=chatIdVal)
+    def unpinGeneralTopicMessages(self, target):
+        return self._safe("unpinAllGeneralForumTopicMessages", chat_id=chatId(target))
 
     def answerInlineQuery(self, query, results: list, cacheTime: int = 30, isPersonal: bool = True, nextOffset: str = ""):
         qid = query.id if isinstance(query, InlineQuery) else query.get("id") if isinstance(query, dict) else query.id
@@ -3520,27 +3559,27 @@ class Gramly:
     def getChat(self, target):
         return self._api_call("getChat", chat_id=chatId(target))
 
-    def getChatMember(self, chatIdVal: int, userId: int):
-        return self._api_call("getChatMember", chat_id=chatIdVal, user_id=userId)
+    def getChatMember(self, target, userId: int):
+        return self._api_call("getChatMember", chat_id=chatId(target), user_id=userId)
 
-    def getChatMemberCount(self, chatIdVal: int) -> int:
-        return self._api_call("getChatMemberCount", chat_id=chatIdVal)
+    def getChatMemberCount(self, target) -> int:
+        return self._api_call("getChatMemberCount", chat_id=chatId(target))
 
-    def isAdmin(self, chatIdVal: int, userId: int) -> bool:
+    def isAdmin(self, target, userId: int) -> bool:
         try:
-            member = self.getChatMember(chatIdVal, userId)
+            member = self.getChatMember(target, userId)
             return member.status in ("administrator", "creator")
         except Exception:
             return False
 
-    def getAdmins(self, chatIdVal: int, includeBots: bool = False) -> list:
-        admins = self._api_call("getChatAdministrators", chat_id=chatIdVal)
+    def getAdmins(self, target, includeBots: bool = False) -> list:
+        admins = self._api_call("getChatAdministrators", chat_id=chatId(target))
         if not includeBots:
             admins = [a for a in admins if not getattr(a, "is_bot", False)]
         return admins
 
-    def getUserBoosts(self, chatIdVal: int, userId: int):
-        return self._api_call("getUserChatBoosts", chat_id=chatIdVal, user_id=userId)
+    def getUserBoosts(self, target, userId: int):
+        return self._api_call("getUserChatBoosts", chat_id=chatId(target), user_id=userId)
 
     def getMe(self):
         return self._api_call("getMe")
@@ -3584,11 +3623,11 @@ class Gramly:
     def removeMyProfilePhoto(self, photoId: str = None):
         return self._api_call("removeMyProfilePhoto", custom_emoji_id=photoId)
 
-    def setMenuButton(self, chatIdVal: int = None, menuButton: dict = None):
-        return self._api_call("setChatMenuButton", chat_id=chatIdVal, menu_button=menuButton)
+    def setMenuButton(self, target=None, menuButton: dict = None):
+        return self._api_call("setChatMenuButton", chat_id=chatId(target) if target is not None else None, menu_button=menuButton)
 
-    def getMenuButton(self, chatIdVal: int = None):
-        return self._api_call("getChatMenuButton", chat_id=chatIdVal)
+    def getMenuButton(self, target=None):
+        return self._api_call("getChatMenuButton", chat_id=chatId(target) if target is not None else None)
 
     def setDefaultAdminRights(self, rights: dict = None, forChannels: bool = False):
         return self._api_call("setMyDefaultAdministratorRights", rights=rights, for_channels=forChannels)
@@ -3659,11 +3698,11 @@ class Gramly:
     def deleteStickerSet(self, name: str):
         return self._api_call("deleteStickerSet", name=name)
 
-    def setChatStickerSet(self, chatIdVal: int, stickerSetName: str):
-        return self._api_call("setChatStickerSet", chat_id=chatIdVal, sticker_set_name=stickerSetName)
+    def setChatStickerSet(self, target, stickerSetName: str):
+        return self._api_call("setChatStickerSet", chat_id=chatId(target), sticker_set_name=stickerSetName)
 
-    def deleteChatStickerSet(self, chatIdVal: int):
-        return self._api_call("deleteChatStickerSet", chat_id=chatIdVal)
+    def deleteChatStickerSet(self, target):
+        return self._api_call("deleteChatStickerSet", chat_id=chatId(target))
 
     def getGifts(self):
         return self._api_call("getAvailableGifts")
@@ -3710,6 +3749,18 @@ class Gramly:
         if "business_message" in update and not await self._runGuards(BusinessMessage(update["business_message"], self)):
             return
         if "edited_business_message" in update and not await self._runGuards(BusinessMessage(update["edited_business_message"], self)):
+            return
+
+        if "callback_query" in update:
+            cbRaw = update["callback_query"]
+            cbData = CallbackData(cbRaw.get("data") or "")
+            if not await self._runGuards(CallbackQuery(cbRaw, cbData)):
+                return
+
+        if "inline_query" in update and not await self._runGuards(InlineQuery(update["inline_query"], self)):
+            return
+
+        if "chat_join_request" in update and not await self._runGuards(JoinRequest(update["chat_join_request"])):
             return
 
         if "business_connection" in update:
