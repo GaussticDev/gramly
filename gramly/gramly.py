@@ -98,7 +98,7 @@ HANDLER_UPDATES: dict = {
     "_bizConnectionHandlers": ["business_connection"],
     "_commandBlocks": ["message", "callback_query"],
 }
-__version__ = "1.3.5"
+__version__ = "1.3.6"
 __bot_api_version__ = "10.3"
 
 
@@ -1238,27 +1238,24 @@ class CallbackData:
 
     def __init__(self, data: str):
         self.raw = data
-        self.parts = data.split(":")
-
-    @property
-    def owner(self) -> Optional[int]:
-        try:
-            return int(self.parts[0])
-        except (IndexError, ValueError):
-            return None
+        self.parts = data.split(":") if data else []
 
     @property
     def action(self) -> str:
-        return self.parts[1] if len(self.parts) > 1 else self.parts[0]
+        return self.parts[0] if self.parts else ""
+
+    @property
+    def args(self) -> tuple:
+        return tuple(self.parts[1:])
 
     def get(self, index: int, cast=str, default=None):
         try:
-            return cast(self.parts[index])
+            return cast(self.args[index]) 
         except (IndexError, ValueError, TypeError):
             return default
 
     def extra(self, index: int = 0, cast=str, default=None):
-        return self.get(2 + index, cast, default)
+        return self.get(index, cast, default)
 
     def __getitem__(self, i):
         return self.parts[i]
@@ -1444,7 +1441,7 @@ class CallbackQuery(ArgsMixin, RawAttrMixin):
     def __init__(self, raw: dict, cb: CallbackData, args: list = None):
         self._raw = raw
         self.cb = cb
-        self.args = args if args is not None else cb.parts[2:]
+        self.args = args if args is not None else list(cb.args)
         self.data = raw.get("data")
         self.message = wrap(raw.get("message", {}))
         self.from_user = User.fromDict(raw.get("from"))
@@ -2325,7 +2322,7 @@ class CommandBlock:
 
         async def _run():
             cb = CallbackData(data)
-            extra = cb.parts[2:]
+            extra = list(cb.args)
             parsed = CallbackQuery(raw, cb, args=extra)
             if route.argsMin is not None and len(extra) < route.argsMin:
                 g.alert(parsed, route.argsError, popup=True) if route.argsError else g.ack(parsed)
