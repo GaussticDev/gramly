@@ -19,9 +19,7 @@ _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _MAX_RETRIES = 3
 _LEVEL_TAG = {logging.DEBUG: "Debug", logging.INFO: "Info", logging.WARNING: "Warning", logging.ERROR: "Error"}
 
-
 class _Log:
-
     def __init__(self):
         self._logger = logging.getLogger("gramly")
 
@@ -51,7 +49,6 @@ class _Log:
     def error(self, action: str, exc_info=None, **ctx):
         self._emit(logging.ERROR, action, exc_info=exc_info, **ctx)
 
-
 _log = _Log()
 
 DEFAULT_PERMISSIONS: dict = {
@@ -73,7 +70,7 @@ DEFAULT_PERMISSIONS: dict = {
 
 HANDLER_UPDATES: dict = {
     "_messageHandlers": ["message"],
-    "_editedHandlers": ["edited_message", "edited_business_message", "edited_channel_post"],
+    "_editedHandlers": ["edited_message", "edited_channel_post"],
     "_postHandlers": ["channel_post"],
     "_callbackHandlers": ["callback_query"],
     "_inlineHandlers": ["inline_query"],
@@ -96,15 +93,14 @@ HANDLER_UPDATES: dict = {
     "_bizEditedHandlers": ["edited_business_message"],
     "_bizDeletedHandlers": ["deleted_business_messages"],
     "_bizConnectionHandlers": ["business_connection"],
-    "_commandBlocks": ["message", "callback_query"],
+    "_commandBlocks": ["message", "callback_query", "business_message"],
 }
-__version__ = "1.3.6"
+__version__ = "1.4.0"
 __bot_api_version__ = "10.3"
-
 
 __all__ = [
     "Gramly", "Rich",
-    "btn", "row", "kbd", "userRequest", "chatRequest",
+    "btn", "row", "kbd", "userRequest", "chatRequest", "business",
     "CallbackData", "Message", "CallbackQuery", "InlineQuery", "Payment", "PreCheckout",
     "JoinRequest", "GuestQuery", "BusinessMessage", "BusinessConnection",
     "TimerHandle", "CommandBlock", "TelegramError",
@@ -114,14 +110,12 @@ __all__ = [
     "__version__", "__bot_api_version__",
 ]
 
-
 def setupLogging(debug: bool) -> None:
     _log.setup(debug)
 
-
 def chatId(target) -> int:
     if isinstance(target, bool):
-        raise TypeError(f"chat_id must be int, got bool: {target!r}")
+        raise ValueError(f"chat_id must be int, got bool: {target!r}")
     if isinstance(target, int):
         return target
     if isinstance(target, dict):
@@ -131,10 +125,10 @@ def chatId(target) -> int:
         if "message" in target:
             return chatId(target["message"])
         if "id" not in target:
-            raise TypeError(f"dict has no 'id' key: {list(target)[:5]!r}")
+            raise ValueError(f"dict has no 'id' key: {list(target)[:5]!r}")
         v = target["id"]
         if not isinstance(v, int):
-            raise TypeError(f"dict 'id' is not int: {v!r}")
+            raise ValueError(f"dict 'id' is not int: {v!r}")
         return v
     uci = getattr(target, "user_chat_id", None)
     if uci:
@@ -146,11 +140,11 @@ def chatId(target) -> int:
         if isinstance(v, dict):
             return int(v["id"])
         if v is None:
-            raise TypeError("chat_id is None")
+            raise ValueError("chat_id is None")
         try:
             return int(v)
         except (TypeError, ValueError) as e:
-            raise TypeError(f"chat_id is not int-like: {v!r}") from e
+            raise ValueError(f"chat_id is not int-like: {v!r}") from e
     if hasattr(target, "chat"):
         c = target.chat
         return c["id"] if isinstance(c, dict) else c.id
@@ -158,12 +152,11 @@ def chatId(target) -> int:
         v = target.id
         if isinstance(v, int):
             return v
-        raise TypeError(f"object id is not int: {v!r} (type={type(target).__name__})")
-    raise TypeError(
+        raise ValueError(f"object id is not int: {v!r} (type={type(target).__name__})")
+    raise ValueError(
         f"Cannot extract chat_id from {type(target).__name__}; "
         "expected int, dict, or object with chat_id/chat/id attribute"
     )
-
 
 def userId(target) -> Optional[int]:
     if isinstance(target, int):
@@ -186,16 +179,21 @@ def userId(target) -> Optional[int]:
         return target.id
     return None
 
-
 def toList(value) -> list:
     if value is None:
         return []
-    return value if isinstance(value, list) else [value]
-
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return list(value)
+    return [value]
 
 def isNotModified(e: Exception) -> bool:
     return "message is not modified" in str(e).lower()
 
+_MEDIA_METHODS: dict = {
+    "video": ("sendVideo", "video"),
+    "audio": ("sendAudio", "audio"),
+    "document": ("sendDocument", "document"),
+}
 
 _MEDIA_META: dict = {
     "photo": ("image/jpeg", "jpg"),
@@ -223,7 +221,6 @@ _EXT_MIME: dict = {
     "pdf": "application/pdf", "zip": "application/zip",
 }
 
-
 def mimeType(ext: str) -> str:
     clean = (ext or "").lower().lstrip(".")
     if clean in _EXT_MIME:
@@ -231,11 +228,9 @@ def mimeType(ext: str) -> str:
     guessed, _ = mimetypes.guess_type(f"file.{clean}" if clean else "")
     return guessed or "application/octet-stream"
 
-
 def _typeFromPath(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return _EXT_TYPE.get(ext, "document")
-
 
 def _typeFromBytes(data: bytes) -> str:
     if len(data) < 4:
@@ -263,7 +258,6 @@ def _typeFromBytes(data: bytes) -> str:
         return "audio"
     return "document"
 
-
 class LRUCache(OrderedDict):
     def __init__(self, maxsize: int):
         super().__init__()
@@ -285,7 +279,6 @@ class LRUCache(OrderedDict):
             return self[key]
         except KeyError:
             return default
-
 
 class Obj:
     __slots__ = ("_d",)
@@ -336,7 +329,6 @@ class Obj:
     def __repr__(self):
         return repr(self._d)
 
-
 def wrap(v):
     if isinstance(v, dict):
         return Obj({k: wrap(v2) for k, v2 in v.items()})
@@ -344,14 +336,12 @@ def wrap(v):
         return [wrap(i) for i in v]
     return v
 
-
 def _to_raw(v):
     if isinstance(v, Obj):
         return {k: _to_raw(vv) for k, vv in v._d.items()}
     if isinstance(v, list):
         return [_to_raw(i) for i in v]
     return v
-
 
 @dataclass
 class User:
@@ -377,7 +367,6 @@ class User:
             return None
         return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
 
-
 @dataclass
 class Chat:
     id: int
@@ -394,7 +383,6 @@ class Chat:
         if d is None:
             return None
         return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
-
 
 @dataclass
 class SuccessfulPayment:
@@ -413,14 +401,11 @@ class SuccessfulPayment:
             return None
         return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
 
-
 class _UserRequest(dict):
     __slots__ = ()
 
-
 class _ChatRequest(dict):
     __slots__ = ()
-
 
 def userRequest(
     requestId: int,
@@ -443,7 +428,6 @@ def userRequest(
     )
     d.update((key, value) for key, value in fields if value is not None)
     return d
-
 
 def chatRequest(
     requestId: int,
@@ -475,6 +459,45 @@ def chatRequest(
     d.update((key, value) for key, value in fields if value is not None)
     return d
 
+class business:
+
+    __slots__ = ("bcIds",)
+
+    def __init__(self, bcId=None):
+        ids = toList(bcId)
+        if ids and not any(ids):
+            raise ValueError("business(bcId=...): business_connection_id must not be empty")
+        self.bcIds = frozenset(str(i) for i in ids if i)
+
+    def __bool__(self) -> bool:
+        return True
+
+    def match(self, target) -> bool:
+        bcId = getattr(target, "bc_id", None)
+        if bcId is None and isinstance(target, (dict, Obj)):
+            raw = target._d if isinstance(target, Obj) else target
+            bcId = raw.get("business_connection_id")
+        return not self.bcIds or bcId in self.bcIds
+
+    def __repr__(self) -> str:
+        return f"business(bcId={sorted(self.bcIds)!r})"
+
+def _businessSpec(value) -> Optional[business]:
+    if value is None or value is False:
+        return None
+    if value is True or value is business:
+        return business()
+    if isinstance(value, business):
+        return value
+    raise ValueError(f"business expects True/False or business(...), got {type(value).__name__!r}")
+
+def _businessArg(values: tuple) -> tuple:
+    found = [v for v in values if isinstance(v, business)]
+    if len(found) > 1:
+        raise ValueError("business marker passed twice")
+    if found:
+        values = tuple(v for v in values if v is not found[0])
+    return values, (found[0] if found else None)
 
 def btn(text: str, action=None, *,
     url: str = None,
@@ -512,7 +535,7 @@ def btn(text: str, action=None, *,
     if total > 1:
         raise ValueError(f"btn('{text}'): exactly one action allowed, got {total}")
     if action is not None and not isinstance(action, (str, _UserRequest, _ChatRequest)):
-        raise TypeError(
+        raise ValueError(
             f"btn('{text}'): action must be a str, userRequest(...), or chatRequest(...); "
             f"got {type(action).__name__!r}"
         )
@@ -545,14 +568,11 @@ def btn(text: str, action=None, *,
         "disabled": disabled,
     }
 
-
 def row(*buttons) -> list:
     return list(buttons)
 
-
 def kbd(*rows) -> list:
     return list(rows)
-
 
 def _wireInlineButton(item: dict) -> Optional[dict]:
     if not isinstance(item, dict):
@@ -589,7 +609,6 @@ def _wireInlineButton(item: dict) -> Optional[dict]:
         b["icon_custom_emoji_id"] = item["emoji"]
     return b
 
-
 def buildInlineKeyboard(rows, forceReply: bool = None) -> dict:
     if not rows:
         markup = {"inline_keyboard": []}
@@ -617,7 +636,6 @@ def buildInlineKeyboard(rows, forceReply: bool = None) -> dict:
     if forceReply:
         markup["force_reply"] = True
     return markup
-
 
 def buildReplyKeyboard(rows, forceReply: bool = None) -> dict:
     if rows is False:
@@ -660,7 +678,6 @@ def buildReplyKeyboard(rows, forceReply: bool = None) -> dict:
         markup["force_reply"] = True
     return markup
 
-
 def _compileRuns(parts) -> list:
     if parts is None:
         return []
@@ -676,7 +693,6 @@ def _compileRuns(parts) -> list:
             out.append(str(p))
     return out
 
-
 def _asBlocks(parts) -> list:
     if isinstance(parts, dict) and "blocks" in parts:
         return parts["blocks"]
@@ -688,7 +704,6 @@ def _asBlocks(parts) -> list:
         else:
             out.append({"type": "paragraph", "text": _compileRuns(it)})
     return out
-
 
 def _resolveMediaSource(item, index: int = 0) -> dict:
     if hasattr(item, "read"):
@@ -718,7 +733,6 @@ def _resolveMediaSource(item, index: int = 0) -> dict:
             _log.warning("richMedia", file=s, err=e)
     return {"media": s}
 
-
 def _resolveInputMedia(item, mediaType: str = None, index: int = 0, documentFallback: str = "photo", extensionlessOnly: bool = False, **fields) -> dict:
     resolved = _resolveMediaSource(item, index)
     if mediaType is None:
@@ -737,7 +751,6 @@ def _resolveInputMedia(item, mediaType: str = None, index: int = 0, documentFall
     entry.update({k: v for k, v in fields.items() if v is not None})
     return entry
 
-
 def _compileMediaMap(media: dict) -> list:
     if not media:
         return []
@@ -746,7 +759,6 @@ def _compileMediaMap(media: dict) -> list:
         wrapped = item if isinstance(item, dict) and "type" in item else _resolveInputMedia(item)
         out.append({"id": name, "media": wrapped})
     return out
-
 
 def _collectRichAttachments(obj):
     files = {}
@@ -770,13 +782,11 @@ def _collectRichAttachments(obj):
 
     return walk(obj), files
 
-
 _RUN_STYLES = ("bold", "italic", "underline", "strike", "spoiler", "mono", "mark", "sub", "sup")
 _RUN_STYLE_WIRE = {
     "bold": "bold", "italic": "italic", "underline": "underline", "strike": "strikethrough",
     "spoiler": "spoiler", "mono": "code", "mark": "marked", "sub": "subscript", "sup": "superscript",
 }
-
 
 def run(text: str, style: str = None, *,
     link: str = None,
@@ -829,52 +839,41 @@ def run(text: str, style: str = None, *,
     if math:
         return {"type": "mathematical_expression", "text": [text]}
 
-
 def emojiRun(customEmojiId: str, alt: str = "🙂") -> dict:
     return {"type": "custom_emoji", "custom_emoji_id": customEmojiId, "alternative_text": alt}
-
 
 def buttonRun(button: dict) -> dict:
     wired = _wireInlineButton(button)
     if wired is None:
-        raise TypeError(f"buttonRun(): expected a btn(...) object, got {type(button).__name__!r}")
+        raise ValueError(f"buttonRun(): expected a btn(...) object, got {type(button).__name__!r}")
     return {"type": "button", "button": wired}
-
 
 def anchor(name: str) -> dict:
     return {"type": "anchor", "name": name}
 
-
 def anchorLink(text: str, name: str) -> dict:
     return {"type": "anchor_link", "text": [text], "anchor_name": name}
-
 
 def ref(name: str) -> dict:
     return {"type": "reference", "name": name}
 
-
 def refLink(text: str, name: str) -> dict:
     return {"type": "reference_link", "text": [text], "reference_name": name}
-
 
 def heading(*parts, size: int = 1) -> dict:
     return {"type": "heading", "text": _compileRuns(parts), "size": max(1, min(size, 6))}
 
-
 def paragraph(*parts) -> dict:
     return {"type": "paragraph", "text": _compileRuns(parts)}
 
-
 def footer(*parts) -> dict:
     return {"type": "footer", "text": _compileRuns(parts)}
-
 
 def quote(*parts, credit=None) -> dict:
     d = {"type": "blockquote", "blocks": _asBlocks(parts)}
     if credit:
         d["credit"] = _compileRuns(credit)
     return d
-
 
 def expandableQuote(*parts, credit=None, expanded: bool = False) -> dict:
     d = {"type": "expandable_blockquote", "blocks": _asBlocks(parts)}
@@ -884,13 +883,11 @@ def expandableQuote(*parts, credit=None, expanded: bool = False) -> dict:
         d["is_expanded"] = True
     return d
 
-
 def pullQuote(*parts, credit=None) -> dict:
     d = {"type": "pullquote", "text": _compileRuns(parts)}
     if credit:
         d["credit"] = _compileRuns(credit)
     return d
-
 
 def item(*parts, checkbox: bool = None, checked: bool = None,
          value: int = None, labelType: str = None, children: list = None) -> dict:
@@ -910,11 +907,9 @@ def item(*parts, checkbox: bool = None, checked: bool = None,
         d["type"] = labelType
     return d
 
-
 def bulletList(*items) -> dict:
     compiled = [it if isinstance(it, dict) and "blocks" in it else item(it) for it in items]
     return {"type": "list", "items": compiled}
-
 
 def codeBlock(text: str, language: str = None) -> dict:
     d = {"type": "pre", "text": _compileRuns(text)}
@@ -922,14 +917,11 @@ def codeBlock(text: str, language: str = None) -> dict:
         d["language"] = language
     return d
 
-
 def mathBlock(expression: str) -> dict:
     return {"type": "mathematical_expression", "expression": expression}
 
-
 def divider() -> dict:
     return {"type": "divider"}
-
 
 def buttonsBlock(*buttons, align: str = None) -> dict:
     flat = []
@@ -949,10 +941,8 @@ def buttonsBlock(*buttons, align: str = None) -> dict:
         d["align"] = align
     return d
 
-
 def thinking(*parts) -> dict:
     return {"type": "thinking", "text": _compileRuns(parts)}
-
 
 def details(summary, *parts, open: bool = False) -> dict:
     summaryParts = summary if isinstance(summary, (list, tuple)) else (summary,)
@@ -960,7 +950,6 @@ def details(summary, *parts, open: bool = False) -> dict:
     if open:
         d["is_open"] = True
     return d
-
 
 def table(rows: list, headerRow: bool = True, bordered: bool = None,
           striped: bool = None, compact: bool = None, caption=None) -> dict:
@@ -994,7 +983,6 @@ def table(rows: list, headerRow: bool = True, bordered: bool = None,
         d["caption"] = _compileRuns(caption)
     return d
 
-
 def _caption(caption, credit=None) -> Optional[dict]:
     if caption is None and credit is None:
         return None
@@ -1002,7 +990,6 @@ def _caption(caption, credit=None) -> Optional[dict]:
     if credit is not None:
         d["credit"] = _compileRuns(credit)
     return d
-
 
 def mapBlock(latitude: float, longitude: float, zoom: int = 15,
              width: int = 400, height: int = 300, caption=None, credit=None) -> dict:
@@ -1016,7 +1003,6 @@ def mapBlock(latitude: float, longitude: float, zoom: int = 15,
         d["caption"] = cap
     return d
 
-
 def _mediaBlockOf(wireType: str, blockKey: str, media, caption=None, credit=None,
                    index: int = 0, spoiler: bool = None, **mediaFields) -> dict:
     resolved = _resolveInputMedia(media, wireType, index, has_spoiler=spoiler or None, **mediaFields)
@@ -1026,30 +1012,23 @@ def _mediaBlockOf(wireType: str, blockKey: str, media, caption=None, credit=None
         d["caption"] = cap
     return d
 
-
 def photo(media, caption=None, credit=None, spoiler: bool = False) -> dict:
     return _mediaBlockOf("photo", "photo", media, caption, credit, spoiler=spoiler)
-
 
 def video(media, caption=None, credit=None, spoiler: bool = False, **kwargs) -> dict:
     return _mediaBlockOf("video", "video", media, caption, credit, spoiler=spoiler, **kwargs)
 
-
 def animation(media, caption=None, credit=None, spoiler: bool = False, **kwargs) -> dict:
     return _mediaBlockOf("animation", "animation", media, caption, credit, spoiler=spoiler, **kwargs)
-
 
 def audio(media, caption=None, credit=None, title: str = None, performer: str = None) -> dict:
     return _mediaBlockOf("audio", "audio", media, caption, credit, title=title, performer=performer)
 
-
 def voiceNote(media, caption=None, credit=None, duration: int = None) -> dict:
     return _mediaBlockOf("voice_note", "voice_note", media, caption, credit, duration=duration)
 
-
 def document(media, caption=None, credit=None, fileName: str = None) -> dict:
     return _mediaBlockOf("document", "document", media, caption, credit, file_name=fileName)
-
 
 def _mediaGroup(kind: str, items: list, caption=None, credit=None) -> dict:
     blocks = []
@@ -1064,18 +1043,14 @@ def _mediaGroup(kind: str, items: list, caption=None, credit=None) -> dict:
         d["caption"] = cap
     return d
 
-
 def collage(items: list, caption=None, credit=None) -> dict:
     return _mediaGroup("collage", items, caption, credit)
-
 
 def slideshow(items: list, caption=None, credit=None) -> dict:
     return _mediaGroup("slideshow", items, caption, credit)
 
-
 def _hasThinking(blocks: list) -> bool:
     return any(b.get("type") == "thinking" for b in blocks)
-
 
 def rich(*blocks, forDraft: bool = False) -> dict:
     compiled = [dict(b) for b in blocks]
@@ -1087,7 +1062,6 @@ def rich(*blocks, forDraft: bool = False) -> dict:
         )
     return {"blocks": compiled}
 
-
 def richMarkdown(text: str, media: dict = None, rtl: bool = None, skipEntityDetection: bool = None) -> dict:
     out = {"markdown": text}
     if media:
@@ -1097,7 +1071,6 @@ def richMarkdown(text: str, media: dict = None, rtl: bool = None, skipEntityDete
     if skipEntityDetection is not None:
         out["skip_entity_detection"] = skipEntityDetection
     return out
-
 
 def richHtml(text: str, media: dict = None, rtl: bool = None, skipEntityDetection: bool = None) -> dict:
     out = {"html": text}
@@ -1109,9 +1082,7 @@ def richHtml(text: str, media: dict = None, rtl: bool = None, skipEntityDetectio
         out["skip_entity_detection"] = skipEntityDetection
     return out
 
-
 _SLOT_PATTERN = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-
 
 def _slotNames(node, order: list) -> None:
     if isinstance(node, str):
@@ -1125,7 +1096,6 @@ def _slotNames(node, order: list) -> None:
     elif isinstance(node, (list, tuple)):
         for v in node:
             _slotNames(v, order)
-
 
 def _fillSlots(node, data: dict):
     if isinstance(node, str):
@@ -1141,17 +1111,15 @@ def _fillSlots(node, data: dict):
         return [_fillSlots(v, data) for v in node]
     return node
 
-
 class TelegramError(Exception):
     def __init__(self, description: str, errorCode: int = 0, retryAfter: int = None):
         super().__init__(description)
         self.description = description
-        self.error_code = errorCode
-        self.retry_after = retryAfter
+        self.errorCode = errorCode
+        self.retryAfter = retryAfter
 
     def __str__(self) -> str:
-        return f"{self.error_code}: {self.description}" if self.error_code else self.description
-
+        return f"{self.errorCode}: {self.description}" if self.errorCode else self.description
 
 class RichTemplate:
     __slots__ = ("_blocks", "_forDraft", "_slotOrder")
@@ -1166,14 +1134,14 @@ class RichTemplate:
 
     def __call__(self, *args, **kwargs) -> dict:
         if len(args) > len(self._slotOrder):
-            raise TypeError(
+            raise ValueError(
                 f"template takes {len(self._slotOrder)} positional slot(s) "
                 f"{self._slotOrder}, got {len(args)}"
             )
         data = dict(zip(self._slotOrder, args))
         for name, value in kwargs.items():
             if name in data:
-                raise TypeError(f"slot '{name}' passed both positionally and by name")
+                raise ValueError(f"slot '{name}' passed both positionally and by name")
             data[name] = value
         filled = [_fillSlots(b, data) for b in self._blocks]
         return rich(*filled, forDraft=self._forDraft)
@@ -1184,7 +1152,6 @@ class RichTemplate:
 
     def __repr__(self) -> str:
         return f"RichTemplate(slots={self._slotOrder!r})"
-
 
 class Rich:
     __slots__ = ()
@@ -1232,7 +1199,6 @@ class Rich:
     Collage = staticmethod(collage)
     Slideshow = staticmethod(slideshow)
 
-
 class CallbackData:
     __slots__ = ("raw", "parts")
 
@@ -1250,12 +1216,9 @@ class CallbackData:
 
     def get(self, index: int, cast=str, default=None):
         try:
-            return cast(self.args[index]) 
+            return cast(self.args[index])
         except (IndexError, ValueError, TypeError):
             return default
-
-    def extra(self, index: int = 0, cast=str, default=None):
-        return self.get(index, cast, default)
 
     def __getitem__(self, i):
         return self.parts[i]
@@ -1265,7 +1228,6 @@ class CallbackData:
 
     def __repr__(self) -> str:
         return f"CallbackData({self.raw!r})"
-
 
 class ArgsMixin:
     def arg(self, index: int, cast=str, default=None):
@@ -1286,7 +1248,6 @@ class ArgsMixin:
     def argsJoined(self, sep: str = " ") -> str:
         return sep.join(self.args)
 
-
 class RawAttrMixin:
     __slots__ = ()
 
@@ -1297,7 +1258,6 @@ class RawAttrMixin:
             raise AttributeError(name)
         v = self._raw[name]
         return wrap(v) if isinstance(v, (dict, list)) else v
-
 
 class Message(ArgsMixin, RawAttrMixin):
     __slots__ = ("_raw", "args", "match", "from_user", "chat", "text", "message_id")
@@ -1434,7 +1394,6 @@ class Message(ArgsMixin, RawAttrMixin):
     def __repr__(self) -> str:
         return f"Message({self.message_id}, {self.text!r})"
 
-
 class CallbackQuery(ArgsMixin, RawAttrMixin):
     __slots__ = ("_raw", "cb", "args", "data", "message", "from_user", "chat", "id", "_answered", "bc_id")
 
@@ -1502,7 +1461,6 @@ class CallbackQuery(ArgsMixin, RawAttrMixin):
     def __repr__(self) -> str:
         return f"CallbackQuery({self.id!r}, {self.data!r})"
 
-
 class Payment:
     __slots__ = ("_raw",)
 
@@ -1548,7 +1506,6 @@ class Payment:
     def __repr__(self) -> str:
         return f"Payment({self.currency} {self.totalAmount} payload={self.payload!r})"
 
-
 class PreCheckout:
     __slots__ = ("_raw", "_gramly")
 
@@ -1593,7 +1550,6 @@ class PreCheckout:
 
     def __repr__(self) -> str:
         return f"PreCheckout({self.currency} {self.totalAmount} payload={self.payload!r})"
-
 
 class JoinRequest(RawAttrMixin):
     __slots__ = ("_raw",)
@@ -1650,7 +1606,6 @@ class JoinRequest(RawAttrMixin):
     def __repr__(self) -> str:
         return f"JoinRequest(user={self.user_id}, chat={self.chat_id})"
 
-
 class BusinessConnection(RawAttrMixin):
     __slots__ = ("_raw",)
 
@@ -1688,7 +1643,6 @@ class BusinessConnection(RawAttrMixin):
 
     def __repr__(self) -> str:
         return f"BusinessConnection(id={self.id!r}, enabled={self.isEnabled})"
-
 
 class BusinessMessage(ArgsMixin, RawAttrMixin):
     __slots__ = (
@@ -1732,11 +1686,6 @@ class BusinessMessage(ArgsMixin, RawAttrMixin):
     def userId(self) -> Optional[int]:
         return self.user_id
 
-    @property
-    def isOwner(self) -> bool:
-        conn = self._gramly.businessConnection(self.bc_id)
-        return bool(conn and conn.user and self.from_user and self.from_user.id == conn.user.id)
-
     def reply(self, text: str, inline=None, keyboard=None, **kwargs):
         return self._gramly.businessSend(self.chat_id, text, self.bc_id, inline=inline, keyboard=keyboard, **kwargs)
 
@@ -1758,7 +1707,6 @@ class BusinessMessage(ArgsMixin, RawAttrMixin):
 
     def __repr__(self) -> str:
         return f"BusinessMessage(chat={self.chat_id}, bc_id={self.bc_id!r}, text={self.text!r})"
-
 
 class GuestQuery:
     __slots__ = ("_raw", "_gramly")
@@ -1798,7 +1746,6 @@ class GuestQuery:
     def __repr__(self) -> str:
         return f"GuestQuery(id={self.id!r})"
 
-
 class InlineQuery:
     __slots__ = ("_raw", "_gramly", "id", "text", "from_user", "offset", "query")
 
@@ -1823,7 +1770,7 @@ class InlineQuery:
         return {
             "type": "article", "id": resultId or title, "title": title,
             "description": description, "thumbnail_url": thumbUrl,
-            "input_message_content": {"message_text": text, "parse_mode": self._gramly.parse_mode},
+            "input_message_content": {"message_text": text, "parse_mode": kwargs.pop("parseMode", None) or self._gramly.parse_mode},
             **kwargs,
         }
 
@@ -1833,13 +1780,11 @@ class InlineQuery:
     def __repr__(self) -> str:
         return f"InlineQuery({self.id!r}, {self.text!r})"
 
-
 def _in_async_task() -> bool:
     try:
         return asyncio.current_task() is not None
     except RuntimeError:
         return False
-
 
 class AsyncAPIClient:
     def __init__(self, token: str, connectTimeout: int = 10, readTimeout: int = 30):
@@ -1871,7 +1816,7 @@ class AsyncAPIClient:
             self._parse(response.content)
             return TelegramError("unknown error", response.status_code)
         except TelegramError as e:
-            return e if e.error_code else TelegramError(e.description, response.status_code)
+            return e if e.errorCode else TelegramError(e.description, response.status_code)
 
     async def _with_retry(self, op):
         last_exc: Exception = RuntimeError("retry: no attempts made")
@@ -1880,14 +1825,14 @@ class AsyncAPIClient:
                 return await op()
             except TelegramError as e:
                 last_exc = e
-                if e.error_code == 429 and e.retry_after:
-                    await asyncio.sleep(e.retry_after)
+                if e.errorCode == 429 and e.retryAfter is not None:
+                    await asyncio.sleep(e.retryAfter)
                     continue
                 raise
             except httpx.HTTPStatusError as e:
                 last_exc = self._safeParse(e.response)
-                if last_exc.error_code == 429 and last_exc.retry_after:
-                    await asyncio.sleep(last_exc.retry_after)
+                if last_exc.errorCode == 429 and last_exc.retryAfter is not None:
+                    await asyncio.sleep(last_exc.retryAfter)
                     continue
                 raise last_exc from e
         raise last_exc
@@ -1904,13 +1849,13 @@ class AsyncAPIClient:
         return await self._with_retry(_do)
 
     async def callFile(self, method: str, fileKey: str, fileObj, filename: str, contentType: str, **params):
-        fileData = fileObj.read() if hasattr(fileObj, "read") else fileObj
+        file_data = fileObj.read() if hasattr(fileObj, "read") else fileObj
         params = {k: v for k, v in params.items() if v is not None}
         data = {}
         for k, v in params.items():
             data[k] = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
         async def _do():
-            resp = await self._client.post(self._url(method), data=data, files={fileKey: (filename, fileData, contentType)})
+            resp = await self._client.post(self._url(method), data=data, files={fileKey: (filename, file_data, contentType)})
             resp.raise_for_status()
             return self._parse(resp.content)
         return await self._with_retry(_do)
@@ -1921,18 +1866,18 @@ class AsyncAPIClient:
             mediaList = [{k: v for k, v in item.items() if not k.startswith("_")} for item in items]
             return await self.call("sendMediaGroup", chat_id=chatId, media=mediaList, **params)
         fields = {"chat_id": str(chatId)}
-        mediaJson = []
+        media_json = []
         for i, item in enumerate(items):
-            rawBytes = item.get("_bytes")
+            raw_bytes = item.get("_bytes")
             entry = {k: v for k, v in item.items() if not k.startswith("_")}
-            if rawBytes is not None:
-                attachName = f"file{i}"
+            if raw_bytes is not None:
+                attach_name = f"file{i}"
                 filename = item.get("_filename", f"file{i}.jpg")
                 ct = item.get("_content_type") or mimeType(filename.rsplit(".", 1)[-1] if "." in filename else "jpg")
-                fields[attachName] = (filename, bytes(rawBytes) if not isinstance(rawBytes, bytes) else rawBytes, ct)
-                entry["media"] = f"attach://{attachName}"
-            mediaJson.append(entry)
-        fields["media"] = json.dumps(mediaJson)
+                fields[attach_name] = (filename, bytes(raw_bytes) if not isinstance(raw_bytes, bytes) else raw_bytes, ct)
+                entry["media"] = f"attach://{attach_name}"
+            media_json.append(entry)
+        fields["media"] = json.dumps(media_json)
         for k, v in params.items():
             if v is not None:
                 fields[k] = json.dumps(v) if isinstance(v, (dict, list)) else str(v)
@@ -1961,9 +1906,7 @@ class AsyncAPIClient:
         except Exception:
             pass
 
-
 class TimerHandle:
-
     def __init__(self):
         self._stop = threading.Event()
 
@@ -1980,7 +1923,6 @@ class TimerHandle:
     def __exit__(self, *exc):
         self.stop()
         return False
-
 
 def matchText(
     text, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None,
@@ -2017,7 +1959,7 @@ def matchText(
 
     if contains is not None:
         if any(c.lower() in tl for c in toList(contains)):
-            return parts[1:], None
+            return t.split(), None
 
     if regex is not None:
         m = re.search(regex, t, re.IGNORECASE)
@@ -2026,14 +1968,13 @@ def matchText(
 
     return None, None
 
-
 class TextRoute:
     __slots__ = ("fn", "args_min", "args_error", "filters", "exact", "starts", "ends", "contains", "regex")
 
-    def __init__(self, fn, argsMin: int = None, argsError: str = None, filters=None, exact=None, starts=None, ends=None, contains=None, regex=None):
+    def __init__(self, fn, args_min: int = None, args_error: str = None, filters=None, exact=None, starts=None, ends=None, contains=None, regex=None):
         self.fn = fn
-        self.args_min = argsMin
-        self.args_error = argsError
+        self.args_min = args_min
+        self.args_error = args_error
         self.filters = list(filters or [])
         self.exact = exact
         self.starts = starts
@@ -2074,7 +2015,6 @@ class TextRoute:
             return None, None
         return None, None
 
-
 class _RouteResult:
     __slots__ = ("route", "args", "match")
 
@@ -2083,14 +2023,12 @@ class _RouteResult:
         self.args = args
         self.match = match
 
-
 @dataclass
 class CallbackRoute:
     fn: Callable
-    argsMin: Optional[int]
-    argsError: Optional[str]
+    args_min: Optional[int]
+    args_error: Optional[str]
     filters: Optional[list] = None
-
 
 class CommandBlock:
     __slots__ = (
@@ -2098,9 +2036,10 @@ class CommandBlock:
         "_withSlash", "_withoutSlash",
         "_blockArgsMin", "_blockArgsError",
         "_filters", "_defaultFn", "_defaultFilters", "_exactRoutes", "_patternRoutes", "_callbackRoutes", "_registered",
+        "_business",
     )
 
-    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None, starts=None, ends=None):
+    def __init__(self, gramly, triggers: list, withSlash: bool = True, withoutSlash: bool = True, args_min: int = None, args_error: str = None, filters=None, starts=None, ends=None, business=None):
         self._gramly = gramly
         self._triggersSingle = set()
         self._triggersMulti = set()
@@ -2114,16 +2053,16 @@ class CommandBlock:
         self._triggerSuffixes = [e.lower() for e in toList(ends)]
         if not (self._triggersSingle or self._triggersMulti or self._triggerPrefixes or self._triggerSuffixes):
             raise ValueError("CommandBlock: provide at least one of triggers, starts=, or ends=")
-        if (self._triggerPrefixes or self._triggerSuffixes) and (argsMin is not None or argsError is not None):
+        if (self._triggerPrefixes or self._triggerSuffixes) and (args_min is not None or args_error is not None):
             raise ValueError(
-                "CommandBlock: argsMin/argsError count args from the block trigger, which is ambiguous "
+                "CommandBlock: args_min/args_error count args from the block trigger, which is ambiguous "
                 "for starts=/ends= blocks (the matched sub-command name would count as an arg). "
                 "Use block.on(name, args=N, error=...) instead."
             )
         self._withSlash = withSlash
         self._withoutSlash = withoutSlash
-        self._blockArgsMin = argsMin
-        self._blockArgsError = argsError
+        self._blockArgsMin = args_min
+        self._blockArgsError = args_error
         self._filters = list(filters or [])
         self._defaultFn = None
         self._defaultFilters = []
@@ -2131,6 +2070,7 @@ class CommandBlock:
         self._patternRoutes: list = []
         self._callbackRoutes: dict = {}
         self._registered = False
+        self._business = _businessSpec(business)
 
     def _extractCommand(self, raw: dict):
         text = raw.get("text") or raw.get("caption") or ""
@@ -2223,17 +2163,7 @@ class CommandBlock:
         return self._resolveTrigger(raw) is not None
 
     async def _runFilterList(self, filters, ctx):
-        for filter_fn in filters or []:
-            try:
-                ok = filter_fn(ctx)
-                if asyncio.iscoroutine(ok):
-                    ok = await ok
-                if not ok:
-                    return False
-            except Exception:
-                _log.error("filter", fn=getattr(filter_fn, "__name__", repr(filter_fn)), exc_info=True)
-                return False
-        return True
+        return await self._gramly._runFilterList(filters, ctx)
 
     def _findRoute(self, subtext: str) -> Optional[_RouteResult]:
         firstWord = subtext.split(" ", 1)[0].lower() if subtext else ""
@@ -2249,19 +2179,13 @@ class CommandBlock:
                 return _RouteResult(route, args, match)
         return None
 
-    def _submitDefault(self, msg: Message, routeFilters=None):
-        filters = self._filters + self._defaultFilters + list(routeFilters or [])
-        if not filters:
-            self._gramly._submit(self._defaultFn, msg)
+    def _submitDefault(self, msg: Message, routeFilters=None, spec: business = None):
+        if spec is not None and not spec.match(msg):
             return
+        filters = self._filters + self._defaultFilters + list(routeFilters or [])
+        self._gramly._submitFiltered(self._defaultFn, msg, filters)
 
-        async def _run_checked():
-            if await self._runFilterList(filters, msg):
-                self._gramly._submit(self._defaultFn, msg)
-
-        self._gramly._submit(_run_checked)
-
-    def dispatchMessage(self, raw: dict):
+    def dispatchMessage(self, raw: dict, spec: business = None):
         g = self._gramly
         uid = (raw.get("from") or {}).get("id")
         if uid and not g._checkCooldown(uid, "msg"):
@@ -2270,44 +2194,47 @@ class CommandBlock:
         if resolved is None:
             return
         _, cmdArgs = resolved
+        bcId = raw.get("business_connection_id") if spec is not None else None
+
+        def _reject(text):
+            if spec is not None:
+                g.businessSend(chatId(raw), text, bcId)
+            else:
+                g.send(chatId(raw), text)
 
         if self._blockArgsMin is not None and len(cmdArgs) < self._blockArgsMin:
             if self._blockArgsError:
-                g.send(chatId(raw), self._blockArgsError)
+                _reject(self._blockArgsError)
             return
 
         g._runInterceptors(raw)
         g._markHandled(raw.get("message_id"))
 
+        def _parsed(args, match=None):
+            if spec is not None:
+                return BusinessMessage(raw, g, args, match=match)
+            return Message(raw, args, match=match)
+
         if not cmdArgs:
             if self._defaultFn:
-                self._submitDefault(Message(raw, []))
+                self._submitDefault(_parsed([]), spec=spec)
             return
 
         subtext = " ".join(cmdArgs)
         result = self._findRoute(subtext)
         if result is None:
             if self._defaultFn:
-                self._submitDefault(Message(raw, cmdArgs))
+                self._submitDefault(_parsed(cmdArgs), spec=spec)
             return
 
-        msg = Message(raw, result.args, match=result.match)
+        msg = _parsed(result.args, result.match)
         if result.route.args_min is not None and len(result.args) < result.route.args_min:
             if result.route.args_error:
-                g.send(chatId(raw), result.route.args_error)
+                _reject(result.route.args_error)
             return
-        async def _run_checked():
-            if not await self._runFilterList(self._filters, msg):
-                return
-            if not await self._runFilterList(result.route.filters, msg):
-                return
-            g._submit(result.route.fn, msg)
-
-        if self._filters or result.route.filters:
-            g._submit(_run_checked)
+        if spec is not None and not spec.match(msg):
             return
-
-        g._submit(result.route.fn, msg)
+        g._submitFiltered(result.route.fn, msg, self._filters + result.route.filters)
 
     def dispatchCallback(self, raw: dict):
         g = self._gramly
@@ -2324,30 +2251,28 @@ class CommandBlock:
             cb = CallbackData(data)
             extra = list(cb.args)
             parsed = CallbackQuery(raw, cb, args=extra)
-            if route.argsMin is not None and len(extra) < route.argsMin:
-                g.alert(parsed, route.argsError, popup=True) if route.argsError else g.ack(parsed)
+            if route.args_min is not None and len(extra) < route.args_min:
+                if route.args_error:
+                    await g.alert(parsed, route.args_error, popup=True)
+                else:
+                    await g.ack(parsed)
                 return
             if not await self._runFilterList(self._filters, parsed):
-                g.ack(parsed)
+                await g.ack(parsed)
                 return
             if not await self._runFilterList(route.filters, parsed):
-                g.ack(parsed)
+                await g.ack(parsed)
                 return
             await g._runCallback(parsed, route.fn)
 
-        g._ensure_loop()
-        if g._loop.is_running():
-            asyncio.ensure_future(g._submitForUser(uid, _run, callId=raw.get("id")))
-        else:
-            g._run_coro(g._submitForUser(uid, _run, callId=raw.get("id")))
-
+        g._queueUserTask(uid, _run, callId=raw.get("id"))
 
 class Gramly:
     def __init__(self, token: str, msgCooldown: float = 0.35, inlineCooldown: float = 0.5, connectTimeout: int = 10, readTimeout: int = 30, locksMaxsize: int = 10000, parseMode: str = "HTML", debug: bool = False):
         if not token or not token.strip():
             raise ValueError("Token must be a non-empty string")
         self.debug = debug
-        self.parse_mode = parseMode
+        self.parseMode = parseMode
         setupLogging(debug)
 
         self._loop = None
@@ -2398,17 +2323,30 @@ class Gramly:
         if self._loop.is_running():
             if _in_async_task():
                 warnings.warn(
-                    "Calling a sync method from an async handler without await — use 'await bot.func()'",
+                    "Blocking sync call while the event loop is running — prefer the async form",
                     stacklevel=3)
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
             return future.result()
         return self._loop.run_until_complete(coro)
 
-    def _api_call(self, method, **params):
-        coro = self._api.call(method, **params)
+    def _schedule(self, coro):
+
         if _in_async_task():
-            return coro
+            task = asyncio.ensure_future(coro)
+            task.add_done_callback(self._logTaskError)
+            return task
         return self._run_coro(coro)
+
+    @staticmethod
+    def _logTaskError(task):
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _log.error("background_task", err=exc)
+
+    def _api_call(self, method, **params):
+        return self._schedule(self._api.call(method, **params))
 
     async def _safeCoro(self, method, **params):
         try:
@@ -2418,35 +2356,27 @@ class Gramly:
             return None
 
     def _safe(self, method, **params):
-        coro = self._safeCoro(method, **params)
-        if _in_async_task():
-            return coro
-        return self._run_coro(coro)
+        return self._schedule(self._safeCoro(method, **params))
 
     def _editSafe(self, action: str, method: str, kind: str = None, **params):
-        try:
-            return self._api_call(method, **params)
-        except TelegramError as e:
-            if not isNotModified(e):
-                _log.warning(action, kind=kind, err=e)
+        async def _guarded():
+            try:
+                return await self._api.call(method, **params)
+            except TelegramError as e:
+                if not isNotModified(e):
+                    _log.warning(action, kind=kind, err=e)
+                return None
+
+        return self._schedule(_guarded())
 
     def _api_callFile(self, method, fileKey, fileObj, filename, contentType, **params):
-        coro = self._api.callFile(method, fileKey=fileKey, fileObj=fileObj, filename=filename, contentType=contentType, **params)
-        if _in_async_task():
-            return coro
-        return self._run_coro(coro)
+        return self._schedule(self._api.callFile(method, fileKey=fileKey, fileObj=fileObj, filename=filename, contentType=contentType, **params))
 
     def _api_callMediaGroup(self, chatId, items, **params):
-        coro = self._api.callMediaGroup(chatId, items, **params)
-        if _in_async_task():
-            return coro
-        return self._run_coro(coro)
+        return self._schedule(self._api.callMediaGroup(chatId, items, **params))
 
     def _api_callRich(self, method, jsonField, jsonValue, attachments, **params):
-        coro = self._api.callWithAttachments(method, jsonField, jsonValue, attachments, **params)
-        if _in_async_task():
-            return coro
-        return self._run_coro(coro)
+        return self._schedule(self._api.callWithAttachments(method, jsonField, jsonValue, attachments, **params))
 
     def _debug(self, action: str, **ctx):
         if self.debug:
@@ -2479,8 +2409,8 @@ class Gramly:
             store[uid] = now
         return True
 
-    def _submit(self, fn, *args):
-        coro = self._wrap(fn, *args)
+    def _submit(self, fn, *args, **kwargs):
+        coro = self._wrap(fn, *args, **kwargs)
         self._ensure_loop()
         if self._loop.is_running():
             try:
@@ -2510,31 +2440,31 @@ class Gramly:
                 except Exception:
                     pass
 
-    async def _wrap(self, fn, *args):
+    def _queueUserTask(self, uid: int, fn, callId: str = None):
+        self._submit(self._submitForUser, uid, fn, callId=callId)
+
+    async def _invoke(self, fn, *args, **kwargs):
+        if asyncio.iscoroutinefunction(fn):
+            await fn(*args, **kwargs)
+        else:
+            await asyncio.to_thread(fn, *args, **kwargs)
+
+    async def _wrap(self, fn, *args, **kwargs):
         try:
-            if asyncio.iscoroutinefunction(fn):
-                await fn(*args)
-            else:
-                await asyncio.to_thread(fn, *args)
+            await self._invoke(fn, *args, **kwargs)
         except Exception:
             _log.error("handler", fn=getattr(fn, "__name__", repr(fn)), exc_info=True)
 
     async def _runCallback(self, parsed, fn):
         try:
-            if asyncio.iscoroutinefunction(fn):
-                await fn(parsed)
-            else:
-                await asyncio.to_thread(fn, parsed)
+            await self._invoke(fn, parsed)
         except Exception:
             _log.error("callback_handler", fn=fn.__name__, exc_info=True)
         finally:
             if not parsed._answered:
                 _ack = self.alert(parsed, text="", popup=False)
-                if asyncio.iscoroutine(_ack):
+                if asyncio.isfuture(_ack):
                     await _ack
-
-    def _resolveParseMode(self, **kwargs) -> str:
-        return kwargs.pop("parse_mode", None) or self.parse_mode
 
     def _resolveMarkup(self, inline=None, keyboard=None, forceReply: bool = None):
         if inline is not None:
@@ -2570,7 +2500,7 @@ class Gramly:
 
     def _msgTarget(self, call):
         if isinstance(call, CallbackQuery):
-            hasPhoto = bool(call.message.get("photo") if isinstance(call.message, dict) else getattr(call.message, "photo", None))
+            hasPhoto = bool(getattr(call.message, "photo", None))
             return call.chat_id, call.message_id, hasPhoto, call.bc_id, call.ephemeralId
         if isinstance(call, BusinessMessage):
             return call.chat_id, call.message_id, bool(call._raw.get("photo")), call.bc_id, None
@@ -2620,6 +2550,15 @@ class Gramly:
                 return False
         return True
 
+    def _submitFiltered(self, fn, ctx, filters):
+        if filters:
+            async def _checked(c):
+                if await self._runFilterList(filters, c):
+                    self._submit(fn, c)
+            self._submit(_checked, ctx)
+            return
+        self._submit(fn, ctx)
+
     def _runInterceptors(self, raw: dict):
         for fn in self._interceptors:
             try:
@@ -2632,7 +2571,7 @@ class Gramly:
 
     def guard(self, fn):
         if not callable(fn):
-            raise TypeError(
+            raise ValueError(
                 "guard() expects a function that receives a message context; "
                 f"got {type(fn).__name__}. Use bot.guard(func), not bot.guard(func(...))."
             )
@@ -2647,28 +2586,39 @@ class Gramly:
         self._stopCallbacks.append(fn)
         return self
 
-    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None, starts=None, ends=None):
+    def command(self, *triggers, withSlash: bool = True, withoutSlash: bool = True, args_min: int = None, args_error: str = None, filters=None, starts=None, ends=None):
+        triggers, spec = _businessArg(triggers)
+
         def decorator(fn):
             block = CommandBlock(
                 self,
                 list(triggers),
                 withSlash=withSlash,
                 withoutSlash=withoutSlash,
-                argsMin=argsMin,
-                argsError=argsError,
+                args_min=args_min,
+                args_error=args_error,
                 filters=filters,
                 starts=starts,
                 ends=ends,
+                business=spec,
             )
             fn(block)
             block._register()
             return fn
         return decorator
 
-    def onMessage(self, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None, withSlash: bool = True, withoutSlash: bool = True, argsMin: int = None, argsError: str = None, filters=None, business: bool = False):
-        if business:
+    def onMessage(self, commands=None, exact=None, starts=None, ends=None, contains=None, regex=None, withSlash: bool = True, withoutSlash: bool = True, args_min: int = None, args_error: str = None, filters=None):
+        asList = isinstance(commands, (list, tuple))
+        raw, spec = _businessArg(tuple(commands) if asList else (commands,))
+        for v in (exact, starts, ends, contains, regex):
+            if isinstance(v, business):
+                raise ValueError("business marker must be the first argument")
+        commands = (list(raw) or None) if asList else (raw[0] if raw else None)
+        if spec is not None:
             def decorator(fn):
                 def _handle(msg: BusinessMessage):
+                    if not spec.match(msg):
+                        return
                     if any(f is not None for f in (commands, exact, starts, ends, contains, regex)):
                         args, match = matchText(
                             msg.text, commands=commands, exact=exact, starts=starts, ends=ends,
@@ -2678,14 +2628,11 @@ class Gramly:
                             return
                         msg.args = args
                         msg.match = match
-                    if filters:
-                        async def _checked(ctx):
-                            if not await self._runFilterList(filters, ctx):
-                                return
-                            self._submit(fn, ctx)
-                        self._submit(_checked, msg)
+                    if args_min is not None and len(msg.args) < args_min:
+                        if args_error:
+                            self.businessSend(msg.chat_id, args_error, msg.bc_id)
                         return
-                    self._submit(fn, msg)
+                    self._submitFiltered(fn, msg, filters)
                 self._bizMsgHandlers.append(_handle)
                 return fn
             return decorator
@@ -2700,28 +2647,26 @@ class Gramly:
                 if uid and not self._checkCooldown(uid, "msg"):
                     return
                 parsed = Message(raw, args, match=match)
-                if argsMin is not None and len(args) < argsMin:
-                    if argsError:
-                        self.send(raw["chat"]["id"], argsError)
+                if args_min is not None and len(args) < args_min:
+                    if args_error:
+                        self.send(raw["chat"]["id"], args_error)
                     return
                 self._runInterceptors(raw)
                 self._markHandled(raw.get("message_id"))
-                if filters:
-                    async def _checked(ctx):
-                        if not await self._runFilterList(filters, ctx):
-                            return
-                        self._submit(fn, ctx)
-                    self._submit(_checked, parsed)
-                    return
-                self._submit(fn, parsed)
+                self._submitFiltered(fn, parsed, filters)
             self._messageHandlers.append(_handle)
             return fn
         return decorator
 
-    def onEdited(self, business: bool = False):
+    def onEdited(self, *businessMarker):
+        _, spec = _businessArg(businessMarker)
+
         def decorator(fn):
-            if business:
-                self._bizEditedHandlers.append(fn)
+            if spec is not None:
+                def _handle(msg: BusinessMessage):
+                    if spec.match(msg):
+                        self._submit(fn, msg)
+                self._bizEditedHandlers.append(_handle)
                 return fn
 
             def _handle(raw: dict):
@@ -2758,16 +2703,25 @@ class Gramly:
             return fn
         return decorator
 
-    def onAny(self):
+    def onAny(self, *businessMarker, filters=None):
+        _, spec = _businessArg(businessMarker)
+        if spec is not None:
+            def decorator(fn):
+                def _handle(msg: BusinessMessage):
+                    if spec.match(msg):
+                        self._submitFiltered(fn, msg, filters)
+                self._bizMsgHandlers.append(_handle)
+                return fn
+            return decorator
+
         def decorator(fn):
             def _handle(raw: dict):
                 if self._popHandled(raw.get("message_id")):
                     return
-                self._submit(fn, Message(raw, []))
+                self._submitFiltered(fn, Message(raw, []), filters)
             self._anyHandlers.append(_handle)
             return fn
         return decorator
-
 
     def onCallback(self, *prefixes, filters=None):
         def decorator(fn):
@@ -2782,15 +2736,11 @@ class Gramly:
                     cb = CallbackData(data)
                     parsed = CallbackQuery(raw, cb)
                     if routeFilters and not await self._runFilterList(routeFilters, parsed):
-                        self.ack(parsed)
+                        await self.ack(parsed)
                         return
                     await self._runCallback(parsed, fn)
 
-                self._ensure_loop()
-                if self._loop.is_running():
-                    asyncio.ensure_future(self._submitForUser(uid, _run, callId=raw.get("id")))
-                else:
-                    self._run_coro(self._submitForUser(uid, _run, callId=raw.get("id")))
+                self._queueUserTask(uid, _run, callId=raw.get("id"))
             self._callbackHandlers.append(_handle)
             return fn
         return decorator
@@ -2865,21 +2815,27 @@ class Gramly:
         self._bizConnectionHandlers.append(fn)
         return fn
 
-    def onBusinessDeleted(self, fn):
-        self._bizDeletedHandlers.append(fn)
+    def onBusinessDeleted(self, fn, *businessMarker):
+        _, spec = _businessArg(businessMarker)
+        if spec is None:
+            self._bizDeletedHandlers.append(fn)
+            return fn
+
+        def _handle(raw):
+            if spec.match(raw):
+                self._submit(fn, raw)
+        self._bizDeletedHandlers.append(_handle)
         return fn
 
     def onBusinessEdited(self):
-        return self.onEdited(business=True)
+        return self.onEdited(business())
 
     def onBusinessMessage(self, **kw):
-        return self.onMessage(business=True, **kw)
+        return self.onMessage(business(), **kw)
 
     def businessConnection(self, bcId: str):
-        coro = self._businessConnection(bcId)
-        if _in_async_task():
-            return coro
-        return self._run_coro(coro)
+
+        return self._schedule(self._businessConnection(bcId))
 
     async def _businessConnection(self, bcId: str):
         with self._bizConnCacheLock:
@@ -2898,7 +2854,7 @@ class Gramly:
 
     def businessSend(self, target, text: str, bcId: str, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendMessage", chat_id=chatId(target), text=text, parse_mode=self.parse_mode, business_connection_id=bcId, reply_markup=markup, **kwargs)
+        return self._api_call("sendMessage", chat_id=chatId(target), text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, business_connection_id=bcId, reply_markup=markup, **kwargs)
 
     def businessAction(self, target, bcId: str, action: str = "typing"):
         return self._safe("sendChatAction", chat_id=chatId(target), action=action, business_connection_id=bcId)
@@ -2934,27 +2890,25 @@ class Gramly:
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
         if isinstance(text, dict):
-            built = text
-            cleaned, attachments = _collectRichAttachments(built)
-            self._debug("send", chat=cid, rich=True, blocks=len(built.get("blocks", [])) or None)
+            cleaned, attachments = _collectRichAttachments(text)
+            self._debug("send", chat=cid, rich=True, blocks=len(text.get("blocks", [])) or None)
             return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
                 chat_id=cid, reply_markup=markup, **kwargs)
         self._debug("send", chat=cid, text=f"{text[:40]!r}")
         if photo is not None:
-            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
+        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def reply(self, message, text, keyboard=None, inline=None, photo=None, forceReply: bool = None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard, forceReply=forceReply)
         cid, msgId = self._msgFrom(message)
         if isinstance(text, dict):
-            built = text
-            cleaned, attachments = _collectRichAttachments(built)
+            cleaned, attachments = _collectRichAttachments(text)
             return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
                 chat_id=cid, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
         if photo is not None:
-            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
-        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
+            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
+        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, reply_to_message_id=msgId, **kwargs)
 
     def ephemeral(self, target, text, to=None, keyboard=None, inline=None, photo=None,
                   replaceCallbackMessage: bool = None, **kwargs):
@@ -2965,16 +2919,15 @@ class Gramly:
         ephParams = self._ephemeralParams(receiver, callId, replaceCallbackMessage)
         self._debug("ephemeral", chat=cid, to=receiver)
         if isinstance(text, dict):
-            built = text
-            cleaned, attachments = _collectRichAttachments(built)
+            cleaned, attachments = _collectRichAttachments(text)
             self._debug("ephemeral", chat=cid, to=receiver, rich=True)
             return self._api_callRich("sendRichMessage", "rich_message", cleaned, attachments,
                 chat_id=cid, reply_markup=markup, ephemeral_message_parameters=ephParams,
                 reply_parameters=replyParams, **kwargs)
         if photo is not None:
-            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=self.parse_mode,
+            return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode,
                 reply_markup=markup, ephemeral_message_parameters=ephParams, reply_parameters=replyParams, **kwargs)
-        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=self.parse_mode,
+        return self._api_call("sendMessage", chat_id=cid, text=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode,
             reply_markup=markup, ephemeral_message_parameters=ephParams, reply_parameters=replyParams, **kwargs)
 
     def edit(self, call, text, inline=None, photo=None, showCaption: bool = None, **kwargs):
@@ -2983,22 +2936,21 @@ class Gramly:
         if ephId is not None:
             self._debug("edit", chat=cid, ephemeral=ephId)
             if photo is not None:
-                media = _resolveInputMedia(photo, "photo", caption=text, parse_mode=self.parse_mode,
+                media = _resolveInputMedia(photo, "photo", caption=text, parse_mode=kwargs.pop("parseMode", None) or self.parseMode,
                                             show_caption_above_media=showCaption)
                 cleanedMedia, attachments = _collectRichAttachments(media)
                 return self._api_callRich("editEphemeralMessageMedia", "media", cleanedMedia, attachments,
                     chat_id=cid, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
             if hasPhoto:
-                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=cid, ephemeral_message_id=ephId, parse_mode=self.parse_mode, show_caption_above_media=showCaption, reply_markup=markup, **kwargs)
+                return self._editSafe("edit", "editEphemeralMessageCaption", kind="ephemeral_caption", caption=text, chat_id=cid, ephemeral_message_id=ephId, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, show_caption_above_media=showCaption, reply_markup=markup, **kwargs)
             if isinstance(text, dict):
                 cleaned, attachments = _collectRichAttachments(text)
                 if attachments:
                     raise ValueError("edit: rich message references local files; use a file_id or URL when editing an ephemeral message")
                 return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_rich", rich_message=cleaned, chat_id=cid, ephemeral_message_id=ephId, reply_markup=markup, **kwargs)
-            return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_text", text=text, chat_id=cid, ephemeral_message_id=ephId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._editSafe("edit", "editEphemeralMessageText", kind="ephemeral_text", text=text, chat_id=cid, ephemeral_message_id=ephId, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
         if isinstance(text, dict):
-            built = text
-            cleaned, attachments = _collectRichAttachments(built)
+            cleaned, attachments = _collectRichAttachments(text)
             if attachments:
                 raise ValueError("edit: rich message references local files; use a file_id or URL when editing")
             self._debug("edit", chat=cid, msg=msgId, bc=bcId, rich=True)
@@ -3007,11 +2959,11 @@ class Gramly:
                 business_connection_id=bcId, reply_markup=markup, **kwargs)
         self._debug("edit", chat=cid, msg=msgId, bc=bcId)
         if photo is not None:
-            media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
+            media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parseMode}
             return self._editSafe("edit", "editMessageMedia", kind="media", media=media, chat_id=cid, message_id=msgId, business_connection_id=bcId, reply_markup=markup, **kwargs)
         if hasPhoto:
-            return self._editSafe("edit", "editMessageCaption", kind="caption", caption=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._editSafe("edit", "editMessageText", kind="text", text=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._editSafe("edit", "editMessageCaption", kind="caption", caption=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
+        return self._editSafe("edit", "editMessageText", kind="text", text=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def editMarkup(self, call, inline=None):
         cid, msgId, _, bcId, ephId = self._msgTarget(call)
@@ -3024,15 +2976,12 @@ class Gramly:
         cid, msgId, hasPhoto, bcId, _ = self._msgTarget(call)
         markup = buildInlineKeyboard(inline) if inline is not None else None
         if photo is not None:
-            media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parse_mode}
+            media = {"type": "photo", "media": photo, "caption": text, "parse_mode": self.parseMode}
             return self._editSafe("replace", "editMessageMedia", kind="swap_photo", media=media, chat_id=cid, message_id=msgId, business_connection_id=bcId, reply_markup=markup)
         if hasPhoto:
-            try:
-                self._api_call("deleteMessage", chat_id=cid, message_id=msgId)
-            except Exception:
-                pass
-            return self._api_call("sendMessage", chat_id=cid, text=text, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._editSafe("replace", "editMessageText", text=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            self._safe("deleteMessage", chat_id=cid, message_id=msgId)
+            return self._api_call("sendMessage", chat_id=cid, text=text, business_connection_id=bcId, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
+        return self._editSafe("replace", "editMessageText", text=text, chat_id=cid, message_id=msgId, business_connection_id=bcId, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def editLiveLocation(self, call, latitude: float, longitude: float, inline=None, **kwargs):
         cid, msgId, _, bcId, _ = self._msgTarget(call)
@@ -3060,11 +3009,10 @@ class Gramly:
             _log.warning("alert", err=e)
 
     def ack(self, call):
-        self.alert(call, text="", popup=False)
+        return self.alert(call, text="", popup=False)
 
     def delete(self, target, messageId=None, bcId: str = None) -> bool:
-        """Всё удаление в одном методе: delete(msg) | delete(chat, id) |
-        delete(chat, [ids]) | delete(..., bcId=...) для бизнес-чатов."""
+
         try:
             if messageId is None:
                 cid, msgId, _, bc, ephId = self._msgTarget(target)
@@ -3137,18 +3085,18 @@ class Gramly:
         if isinstance(photo, list):
             media = [{"type": "photo", "media": p.get("file") if isinstance(p, dict) else p} for p in photo]
             if caption:
-                media[0].update(caption=caption, parse_mode=self.parse_mode)
+                media[0].update(caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode)
             return self._api_call("sendMediaGroup", chat_id=cid, media=media, **kwargs)
         if hasattr(photo, "read") or isinstance(photo, (bytes, bytearray)):
             return self._api_callFile("sendPhoto", "photo", photo, "photo.jpg", "image/jpeg",
-                chat_id=cid, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+                chat_id=cid, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
+        return self._api_call("sendPhoto", chat_id=cid, photo=photo, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def businessPhoto(self, target, photo, bcId: str, caption=None, inline=None, keyboard=None, **kwargs):
         return self.photo(target, photo, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def animation(self, target, animation, caption: str = None, **kwargs):
-        return self._api_call("sendAnimation", chat_id=chatId(target), animation=animation, caption=caption, parse_mode=self.parse_mode, **kwargs)
+        return self._api_call("sendAnimation", chat_id=chatId(target), animation=animation, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, **kwargs)
 
     def businessAnimation(self, target, animation, bcId: str, caption: str = None, **kwargs):
         return self.animation(target, animation, caption=caption, business_connection_id=bcId, **kwargs)
@@ -3178,14 +3126,15 @@ class Gramly:
         except Exception as e:
             _log.warning("react", chat=cid, msg=mid, err=e)
 
-    def _normalizeMediaItem(self, index: int, item, caption: str = None) -> dict:
-        fields = {"caption": caption, "parse_mode": self.parse_mode if caption else None}
+    def _normalizeMediaItem(self, index: int, item, caption: str = None, parseMode: str = None) -> dict:
+        fields = {"caption": caption, "parse_mode": (parseMode or self.parseMode) if caption else None}
         return _resolveInputMedia(item, index=index, extensionlessOnly=True, **fields)
 
     def media(self, target, items, caption: str = None, inline=None, keyboard=None, **kwargs):
         cid = chatId(target)
         markup = self._resolveMarkup(inline, keyboard)
 
+        parseMode = kwargs.pop("parseMode", None) or self.parseMode
         if not isinstance(items, list):
             items = [items]
         if not items:
@@ -3196,7 +3145,7 @@ class Gramly:
             items = items[:10]
 
         normalized = [
-            self._normalizeMediaItem(i, item, caption if i == 0 else None)
+            self._normalizeMediaItem(i, item, caption if i == 0 else None, parseMode=parseMode)
             for i, item in enumerate(items)
         ]
 
@@ -3207,43 +3156,38 @@ class Gramly:
         m = normalized[0]
         mtype = m.get("type", "photo")
         cap = m.get("caption")
-        _METHODS = {
-            "video": ("sendVideo", "video"),
-            "audio": ("sendAudio", "audio"),
-            "document": ("sendDocument", "document"),
-        }
-        method, key = _METHODS.get(mtype, ("sendPhoto", "photo"))
+        method, key = _MEDIA_METHODS.get(mtype, ("sendPhoto", "photo"))
         if m.get("_bytes") is not None:
-            return self._api_callFile(method, fileKey=key, fileObj=m["_bytes"], filename=m["_filename"], contentType=m["_content_type"], chat_id=cid, caption=cap, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
-        return self._api_call(method, chat_id=cid, **{key: m["media"]}, caption=cap, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+            return self._api_callFile(method, fileKey=key, fileObj=m["_bytes"], filename=m["_filename"], contentType=m["_content_type"], chat_id=cid, caption=cap, parse_mode=parseMode, reply_markup=markup, **kwargs)
+        return self._api_call(method, chat_id=cid, **{key: m["media"]}, caption=cap, parse_mode=parseMode, reply_markup=markup, **kwargs)
 
     def businessMedia(self, target, items, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
         return self.media(target, items, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def video(self, target, video, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendVideo", chat_id=chatId(target), video=video, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._api_call("sendVideo", chat_id=chatId(target), video=video, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def businessVideo(self, target, video, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
         return self.video(target, video, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def document(self, target, doc, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendDocument", chat_id=chatId(target), document=doc, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._api_call("sendDocument", chat_id=chatId(target), document=doc, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def businessDocument(self, target, doc, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
         return self.document(target, doc, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def audio(self, target, audio, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendAudio", chat_id=chatId(target), audio=audio, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._api_call("sendAudio", chat_id=chatId(target), audio=audio, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def businessAudio(self, target, audio, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
         return self.audio(target, audio, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
 
     def voice(self, target, voice, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendVoice", chat_id=chatId(target), voice=voice, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._api_call("sendVoice", chat_id=chatId(target), voice=voice, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def businessVoice(self, target, voice, bcId: str, caption: str = None, inline=None, keyboard=None, **kwargs):
         return self.voice(target, voice, caption=caption, inline=inline, keyboard=keyboard, business_connection_id=bcId, **kwargs)
@@ -3318,7 +3262,7 @@ class Gramly:
 
     def livePhoto(self, target, photo, animation, caption: str = None, inline=None, keyboard=None, **kwargs):
         markup = self._resolveMarkup(inline, keyboard)
-        return self._api_call("sendLivePhoto", chat_id=chatId(target), photo=photo, animation=animation, caption=caption, parse_mode=self.parse_mode, reply_markup=markup, **kwargs)
+        return self._api_call("sendLivePhoto", chat_id=chatId(target), photo=photo, animation=animation, caption=caption, parse_mode=kwargs.pop("parseMode", None) or self.parseMode, reply_markup=markup, **kwargs)
 
     def messageDraft(self, target, draftId: int, text="", inline=None, keyboard=None,
                       canStop: bool = None, keepOnStop: bool = None, **kwargs):
@@ -3474,7 +3418,7 @@ class Gramly:
         return self._safe("answerWebAppQuery", web_app_query_id=webAppQueryId, result=result)
 
     def answerGuestQuery(self, queryId: str, text: str, parseMode: str = None, **kwargs):
-        return self._api_call("answerGuestQuery", guest_query_id=queryId, message={"text": text, "parse_mode": parseMode or self.parse_mode, **kwargs})
+        return self._api_call("answerGuestQuery", guest_query_id=queryId, message={"text": text, "parse_mode": parseMode or self.parseMode, **kwargs})
 
     def answerShippingQuery(self, shippingQueryId: str, ok: bool, **kwargs):
         return self._api_call("answerShippingQuery", shipping_query_id=shippingQueryId, ok=ok, **kwargs)
@@ -3769,7 +3713,12 @@ class Gramly:
             return
 
         if "business_message" in update:
-            msg = BusinessMessage(update["business_message"], self)
+            raw = update["business_message"]
+            msg = BusinessMessage(raw, self)
+            for block in self._commandBlocks:
+                if block._business is not None and block._matchTrigger(raw):
+                    block.dispatchMessage(raw, spec=block._business)
+                    return
             for h in self._bizMsgHandlers:
                 h(msg)
             return
@@ -3786,7 +3735,7 @@ class Gramly:
                 self._submit(h, raw)
             return
 
-        if "guest_message" in update:
+        elif "guest_message" in update:
             raw = update["guest_message"]
             for h in self._guestHandlers:
                 self._submit(h, GuestQuery(raw, self))
@@ -3813,6 +3762,8 @@ class Gramly:
                 for h in self._webappHandlers:
                     self._submit(h, msg)
             for block in self._commandBlocks:
+                if block._business is not None:
+                    continue
                 if block._matchTrigger(raw):
                     block.dispatchMessage(raw)
                     return
@@ -3920,7 +3871,7 @@ class Gramly:
         try:
             me = await self._api.call("getMe")
         except TelegramError as e:
-            if e.error_code == 401:
+            if e.errorCode == 401:
                 _log.error("startup", reason="invalid_token", err=e.description)
             else:
                 _log.error("startup", reason="getMe_failed", err=e)
